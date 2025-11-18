@@ -1,26 +1,53 @@
 @import "tailwindcss";
 
+/* CultureOS theme tokens (Tailwind v4, CSS-first) */
+@theme {
+  /* Shell colours */
+  --color-shell-bg: #050509;
+  --color-shell-panel: #05050a;
+  --color-shell-border: rgba(255 255 255 / 0.08);
+
+  /* Brand colours */
+  --color-brand-pink: #ff2a8b;
+  --color-brand-pink-soft: #ff4aa0;
+  --color-brand-amber: #ffb347;
+
+  /* Trend states */
+  --color-trend-emerging: #ffdd80;
+  --color-trend-peaking: #4df3a3;
+  --color-trend-stable: #7dd3fc;
+  --color-trend-declining: #ff7878;
+
+  /* Radii */
+  --radius-pill: 999px;
+  --radius-xl2: 1.25rem;
+
+  /* Shadows */
+  --shadow-ring-soft: 0 0 0 1px rgba(255 255 255 / 0.04);
+  --shadow-brand-glow: 0 0 30px rgba(255 42 139 / 0.55);
+}
+
+/* Global tweaks */
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  color-scheme: dark;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  @apply bg-shell-bg text-neutral-50;
+}
+
+/* Simple scrollbar polish (optional) */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #050509;
+}
+::-webkit-scrollbar-thumb {
+  background: #2f2f3a;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4a4a5a;
 }
