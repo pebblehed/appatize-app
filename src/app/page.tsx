@@ -45,13 +45,16 @@ export default function RadarPage() {
                   Emerging
                 </p>
                 <h3 className="mb-1 text-sm font-semibold text-neutral-50">
-                  &quot;Street POV micro-vlogs&quot;
+                  "Street POV micro-vlogs"
                 </h3>
+                <p className="text-[11px] text-neutral-500 mb-1">
+                  ↑ +34% week-on-week
+                </p>
                 <p className="mb-3 text-xs text-neutral-400">
                   Rising POV-style videos with raw, handheld city footage.
                 </p>
                 <Link
-                  href="#"
+                  href="/trends"
                   className="text-[11px] font-medium text-brand-pink transition-colors hover:text-brand-pinkSoft"
                 >
                   View in Trends →
@@ -64,16 +67,42 @@ export default function RadarPage() {
                   Peaking
                 </p>
                 <h3 className="mb-1 text-sm font-semibold text-neutral-50">
-                  &quot;Day-in-the-life work content&quot;
+                  "Day-in-the-life work content"
                 </h3>
+                <p className="text-[11px] text-neutral-500 mb-1">
+                  ↔ Holding strong
+                </p>
                 <p className="mb-3 text-xs text-neutral-400">
                   Relatable behind-the-scenes content showing real workflows.
                 </p>
                 <Link
-                  href="#"
+                  href="/trends"
                   className="text-[11px] font-medium text-brand-pink transition-colors hover:text-brand-pinkSoft"
                 >
                   Turn into a brief →
+                </Link>
+              </article>
+
+              {/* Stable trend (NEW) */}
+              <article className="rounded-2xl border border-shell-border bg-black/20 px-4 py-4 transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-pink/40 hover:shadow-brand-glow/40">
+                <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-trend-stable">
+                  Stable
+                </p>
+                <h3 className="mb-1 text-sm font-semibold text-neutral-50">
+                  "Expectation vs reality memes"
+                </h3>
+                <p className="text-[11px] text-neutral-500 mb-1">
+                  ▢ Evergreen cultural presence
+                </p>
+                <p className="mb-3 text-xs text-neutral-400">
+                  Evergreen, endlessly remixable, still widely used across
+                  platforms.
+                </p>
+                <Link
+                  href="/trends"
+                  className="text-[11px] font-medium text-brand-pink transition-colors hover:text-brand-pinkSoft"
+                >
+                  Explore →
                 </Link>
               </article>
             </div>
@@ -93,17 +122,26 @@ export default function RadarPage() {
           </div>
 
           <div className="mt-1 flex flex-col gap-2">
-            <button className="w-full rounded-pill bg-brand-pink px-4 py-2.5 text-xs font-semibold text-white shadow-brand-glow transition-all duration-200 hover:-translate-y-0.5 hover:bg-brand-pinkSoft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-pink/70 active:translate-y-0">
+            <Link
+              href="/trends"
+              className="w-full rounded-pill bg-brand-pink px-4 py-2.5 text-xs font-semibold text-white shadow-brand-glow transition-all duration-200 hover:-translate-y-0.5 hover:bg-brand-pinkSoft"
+            >
               Browse Trends
-            </button>
+            </Link>
 
-            <button className="w-full rounded-pill border border-shell-border bg-black/30 px-4 py-2.5 text-xs font-medium text-neutral-200 transition-all duration-200 hover:-translate-y-0.5 hover:bg-black/50 hover:border-brand-pink/40 active:translate-y-0">
+            <Link
+              href="/briefs"
+              className="w-full rounded-pill border border-shell-border bg-black/30 px-4 py-2.5 text-xs font-medium text-neutral-200 transition-all duration-200 hover:-translate-y-0.5 hover:bg-black/50 hover:border-brand-pink/40"
+            >
               View Briefs
-            </button>
+            </Link>
 
-            <button className="w-full rounded-pill border border-shell-border bg-black/10 px-4 py-2.5 text-xs font-medium text-neutral-300 transition-all duration-200 hover:-translate-y-0.5 hover:bg-black/30 active:translate-y-0">
+            <Link
+              href="/scripts"
+              className="w-full rounded-pill border border-shell-border bg-black/10 px-4 py-2.5 text-xs font-medium text-neutral-300 transition-all duration-200 hover:-translate-y-0.5 hover:bg-black/30"
+            >
               Saved Scripts
-            </button>
+            </Link>
           </div>
         </aside>
       </div>

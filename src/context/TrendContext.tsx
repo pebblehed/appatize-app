@@ -7,45 +7,29 @@ import React, {
   useState,
   ReactNode,
 } from "react";
+import type { Trend } from "./BriefContext";
 
-// Shape of a trend object as used on the Trends page
-export interface Trend {
-  state: string;
-  stateClass: string;
-  title: string;
-  summary: string;
-  format: string;
-  momentum: string;
-}
-
-// Context value shape
 interface TrendContextValue {
   selectedTrend: Trend | null;
-  setSelectedTrend: (trend: Trend | null) => void;
+  setSelectedTrend: (t: Trend | null) => void;
 }
 
-// Create the context
 const TrendContext = createContext<TrendContextValue | undefined>(undefined);
 
-// Provider component to wrap the app
 export function TrendProvider({ children }: { children: ReactNode }) {
   const [selectedTrend, setSelectedTrend] = useState<Trend | null>(null);
 
-  const value: TrendContextValue = {
-    selectedTrend,
-    setSelectedTrend,
-  };
-
   return (
-    <TrendContext.Provider value={value}>{children}</TrendContext.Provider>
+    <TrendContext.Provider value={{ selectedTrend, setSelectedTrend }}>
+      {children}
+    </TrendContext.Provider>
   );
 }
 
-// Convenience hook for consuming the context
 export function useTrendContext(): TrendContextValue {
   const ctx = useContext(TrendContext);
   if (!ctx) {
-    throw new Error("useTrendContext must be used within a TrendProvider");
+    throw new Error("useTrendContext must be used inside TrendProvider");
   }
   return ctx;
 }

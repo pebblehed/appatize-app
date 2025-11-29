@@ -6,8 +6,8 @@ import { TrendProvider } from "@/context/TrendContext";
 import { BriefProvider } from "@/context/BriefContext";
 
 export const metadata: Metadata = {
-  title: "CultureOS MVP",
-  description: "Trend, UGC and OS for modern brands and creators.",
+  title: "Appatize",
+  description: "Where brands meet the moment.",
 };
 
 export default function RootLayout({

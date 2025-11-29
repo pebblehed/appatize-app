@@ -18,8 +18,7 @@ const mockBriefs = [
   {
     title: "Day-in-the-life content for SaaS founder",
     trend: "Day-in-the-life work content",
-    objective:
-      "Humanise the product by showing real workflows and routines.",
+    objective: "Humanise the product by showing real workflows and routines.",
     status: "In review",
   },
   {
@@ -79,7 +78,7 @@ export default function BriefsPage() {
         cta: aiBrief.cta,
         deliverables: aiBrief.deliverables,
         status: "AI-generated",
-        fullBrief: aiBrief, // for the script generator
+        fullBrief: aiBrief,
       });
 
       // Step 3 — Navigate to script page
@@ -93,6 +92,7 @@ export default function BriefsPage() {
 
   return (
     <div className="space-y-8">
+      {/* HEADER */}
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Briefs</h1>
         <p className="text-sm text-neutral-400">
@@ -101,18 +101,14 @@ export default function BriefsPage() {
         </p>
       </header>
 
-      {/* ------------------------------------------------------------------ */}
-      {/* Loading State for AI generation */}
-      {/* ------------------------------------------------------------------ */}
+      {/* LOADING */}
       {loading && (
         <section className="rounded-2xl border border-brand-pink/60 bg-shell-panel p-4 text-xs shadow-brand-glow">
           <p className="text-neutral-200">Generating brief…</p>
         </section>
       )}
 
-      {/* ------------------------------------------------------------------ */}
-      {/* AI-generated brief card (from selected trend) */}
-      {/* ------------------------------------------------------------------ */}
+      {/* AI-GENERATED BRIEF */}
       {!loading && selectedTrend ? (
         <section className="space-y-3">
           <article className="rounded-2xl border border-brand-pink/60 bg-shell-panel p-4 text-xs shadow-brand-glow">
@@ -139,9 +135,7 @@ export default function BriefsPage() {
         </section>
       ) : null}
 
-      {/* ------------------------------------------------------------------ */}
-      {/* Existing mock brief list */}
-      {/* ------------------------------------------------------------------ */}
+      {/* MOCK BRIEF LIST */}
       <section className="space-y-3">
         {mockBriefs.map((brief) => (
           <article
@@ -155,6 +149,7 @@ export default function BriefsPage() {
                 </h2>
                 <p className="text-neutral-400">{brief.objective}</p>
               </div>
+
               <div className="flex flex-col items-start gap-2 md:items-end">
                 <button
                   onClick={() => generateScriptFromBrief(brief)}
@@ -162,9 +157,14 @@ export default function BriefsPage() {
                 >
                   Generate script
                 </button>
-                <button className="rounded-pill border border-shell-border bg-black/30 px-3 py-1 font-medium text-neutral-100 transition-all hover:-translate-y-0.5 hover:border-brand-pink/45">
+
+                {/* UPDATED BUTTON */}
+                <Link
+                  href="/briefs/edit"
+                  className="rounded-pill border border-shell-border bg-black/30 px-3 py-1 font-medium text-neutral-100 transition-all hover:-translate-y-0.5 hover:border-brand-pink/45"
+                >
                   Open brief
-                </button>
+                </Link>
               </div>
             </div>
           </article>

@@ -4,7 +4,7 @@ import OpenAI from "openai";
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { brief } = body;
+    const { brief, platform = "TikTok", angles = 1 } = body;
 
     if (!brief) {
       return NextResponse.json({ error: "Missing brief" }, { status: 400 });
@@ -14,15 +14,44 @@ export async function POST(req: Request) {
       apiKey: process.env.OPENAI_API_KEY!,
     });
 
-    const prompt = `
-You are the Script Engine inside CultureOS.
+    // Platform-specific guidance
+    const platformGuidance = {
+      TikTok: `
+- Fast hook within 0-2 seconds
+- High-energy edits
+- Text overlays recommended
+- POV-style moments encouraged
+- Ending CTA should be short + punchy
+`,
+      "Instagram Reels": `
+- Aesthetic visuals + smoother pacing
+- Use elegant text overlays
+- Hooks should be curiosity-based
+- Allow for slightly more storytelling
+- Ending CTA can be softer
+`,
+      "YouTube Shorts": `
+- Story-driven approach
+- Clear beats, linear flow
+- Strong explanatory voiceover or captions
+- Ending CTA should be direct
+`,
+    };
 
-Create a TikTok/Reels/Short-native SCRIPT based on this brief:
+    const prompt = `
+You are the CultureOS Script Engine.
+
+Your goal: turn this brief into a ${platform}-native video script.
+
+Platform rules:
+${platformGuidance[platform] || platformGuidance["TikTok"]}
 
 Brief:
 ${JSON.stringify(brief, null, 2)}
 
-Return structure:
+OUTPUT FORMAT (strict JSON):
+
+If "angles" = 1:
 {
   "script": {
     "hook": "...",
@@ -33,6 +62,21 @@ Return structure:
     "captions": ["...", "..."]
   }
 }
+
+If "angles" > 1:
+{
+  "angles": [
+    {
+      "hook": "...",
+      "beat1": "...",
+      "beat2": "...",
+      "beat3": "...",
+      "ending": "..."
+    },
+    { ... },
+    { ... }
+  ]
+}
 `;
 
     const completion = await client.responses.create({
@@ -40,11 +84,22 @@ Return structure:
       input: prompt,
     });
 
-    const resultText = completion.output_text;
+    const raw = completion.output_text;
 
-    return NextResponse.json(JSON.parse(resultText));
-  } catch (err) {
-    console.error("Error generating script:", err);
+    let json;
+    try {
+      json = JSON.parse(raw);
+    } catch (e) {
+      console.error("AI returned invalid JSON:", raw);
+      return NextResponse.json(
+        { error: "Invalid JSON from AI", raw },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json(json);
+  } catch (error) {
+    console.error("Script Engine error:", error);
     return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
 }
