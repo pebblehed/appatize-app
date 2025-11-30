@@ -70,7 +70,7 @@ interface BriefContextValue {
   briefs: Brief[];
   setBriefs: (briefs: Brief[]) => void;
 
-  // Engine helper: Trend + Angle → Appatize creative Brief
+  // Appatize engine helper: Trend + Angle → creative Brief
   generateBriefFromAngle: (trend: Trend, angle: Angle) => Brief;
 }
 
@@ -99,7 +99,8 @@ export function BriefProvider({ children }: { children: ReactNode }) {
         angle.hook ||
         "Turn this cultural signal into creator-native content that feels inevitable.",
 
-      objective: angle.outcome || "Drive meaningful action from the right audience.",
+      objective:
+        angle.outcome || "Drive meaningful action from the right audience.",
 
       audienceHint: angle.audience,
       platformHint: angle.platform,

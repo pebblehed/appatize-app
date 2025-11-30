@@ -1,303 +1,199 @@
 // src/app/trends/page.tsx
 "use client";
 
-import React, { useState } from "react";
+import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import AngleCard from "@/components/AngleCard";
-import {
-  useBriefContext,  
-  type Trend,
-  type Angle,
-} from "@/context/BriefContext";
-import { useTrendContext } from "@/context/TrendContext";
+import FullAnglesModal from "./FullAnglesModal";
 
-/**
- * Local mock trends for the MVP.
- * These now use the shared Trend type from BriefContext.
- */
-const mockTrends: Trend[] = [
+type TrendStatus = "emerging" | "peaking" | "stable" | "declining";
+
+type Trend = {
+  id: string;
+  name: string;
+  status: TrendStatus;
+  movementLabel: string;
+  description: string;
+  category: string;
+  exampleHook: string;
+};
+
+const MOCK_TRENDS: Trend[] = [
   {
-    id: "street-pov",
-    status: "Emerging",
+    id: "street-pov-micro-vlogs",
     name: "Street POV micro-vlogs",
-    description: "Raw, handheld city footage with lo-fi sound and quick cuts.",
-    formatLabel: "Short-form video",
-    momentumLabel: "Momentum: ↑ Fast",
-    category: "Short-form",
+    status: "emerging",
+    movementLabel: "↑ +34% week-on-week",
+    description:
+      "Raw, handheld city POVs with minimal polish, often paired with storytime or inner monologue.",
+    category: "Video format · TikTok / Reels",
+    exampleHook: `"POV: You finally move to the city you've been dreaming about..."`,
   },
   {
-    id: "day-in-the-life",
-    status: "Peaking",
+    id: "work-day-in-the-life",
     name: "Day-in-the-life work content",
+    status: "peaking",
+    movementLabel: "↔ Holding strong",
     description:
-      "Behind-the-scenes relatable workflows and real-world routines.",
-    formatLabel: "Mixed formats",
-    momentumLabel: "Momentum: ↔ Steady",
-    category: "Mixed",
+      "Relatable behind-the-scenes workday content: creators show their real workflows, tools, and routines.",
+    category: "Narrative format · Multi-platform",
+    exampleHook: `"A realistic day in my life as a [role] (no fake 5am gym, I promise).”`,
   },
   {
-    id: "expectation-vs-reality",
-    status: "Stable",
+    id: "expectation-vs-reality-memes",
     name: "Expectation vs reality memes",
+    status: "stable",
+    movementLabel: "▢ Evergreen cultural presence",
     description:
-      "Remixable format contrasting expectation vs reality in funny ways.",
-    formatLabel: "Meme / Video",
-    momentumLabel: "Momentum: ▢ Soft",
-    category: "Meme",
+      "Highly remixable meme templates comparing fantasy vs reality in a punchy, visual way.",
+    category: "Meme format · Multi-platform",
+    exampleHook: `"Expectation: launching the perfect product. Reality: fixing bugs at 2am."`,
   },
 ];
 
+function statusClass(status: TrendStatus) {
+  switch (status) {
+    case "emerging":
+      return "text-trend-emerging";
+    case "peaking":
+      return "text-trend-peaking";
+    case "stable":
+      return "text-trend-stable";
+    case "declining":
+      return "text-trend-declining";
+    default:
+      return "text-neutral-400";
+  }
+}
+
+function statusLabel(status: TrendStatus) {
+  switch (status) {
+    case "emerging":
+      return "Emerging";
+    case "peaking":
+      return "Peaking";
+    case "stable":
+      return "Stable";
+    case "declining":
+      return "Declining";
+  }
+}
+
 export default function TrendsPage() {
   const router = useRouter();
+  const [selectedTrend, setSelectedTrend] = useState<Trend | null>(null);
 
-  const { setActiveBrief, briefs, setBriefs } = useBriefContext();
-  const { selectedTrend, setSelectedTrend } = useTrendContext();
-
-  const [angles, setAngles] = useState<Angle[]>([]);
-  const [isLoadingAngles, setIsLoadingAngles] = useState(false);
-  const [anglesError, setAnglesError] = useState<string | null>(null);
-
-  /**
-   * Call backend to generate angles for a given trend.
-   */
-  const fetchAnglesForTrend = async (trend: Trend) => {
-    try {
-      setIsLoadingAngles(true);
-      setAnglesError(null);
-      setAngles([]);
-
-      const res = await fetch("/api/generateTrendAngles", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          trendTitle: trend.name,
-          momentum: trend.status,
-          format: trend.formatLabel,
-          category: trend.category,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error(`API responded with ${res.status}`);
-      }
-
-      const data = (await res.json()) as { angles?: Angle[] };
-      setAngles(data.angles || []);
-    } catch (error) {
-      console.error("Failed to fetch angles:", error);
-      setAnglesError("Could not generate angles. Try again in a moment.");
-    } finally {
-      setIsLoadingAngles(false);
-    }
-  };
-
-  /**
-   * Explore angles for a trend:
-   * - write trend into global TrendContext
-   * - call backend to generate angles
-   */
-  const handleExploreAngles = (trend: Trend) => {
+  const openAngles = (trend: Trend) => {
     setSelectedTrend(trend);
-    fetchAnglesForTrend(trend);
   };
 
-  /**
-   * Convert a trend into a basic brief and route to /briefs.
-   * (Optional path, but useful for people who want to brief first.)
-   */
-  const handleTurnIntoBrief = (trend: Trend) => {
-    const now = new Date().toISOString();
-
-    const brief = {
-      id: `trend-brief-${trend.id}-${Date.now()}`,
-      title: trend.name,
-      trend,
-      status: "Draft" as const,
-      summary: trend.description,
-      coreMessage: "Turn this cultural signal into creator-native content.",
-      objective: "Define the specific brand outcome in the Briefs view.",
-      audienceHint: "TBD",
-      platformHint: "Any",
-      formatHint: trend.formatLabel,
-      outcomeHint: "TBD",
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    setActiveBrief(brief);
-    setBriefs([...briefs, brief]);
-    router.push("/briefs");
+  const closeAngles = () => {
+    setSelectedTrend(null);
   };
 
-  /**
-   * Jump straight to Scripts from a trend without choosing an angle.
-   */
-  const handleJumpStraightToScript = (trend: Trend) => {
-    const now = new Date().toISOString();
-
-    const brief = {
-      id: `trend-script-${trend.id}-${Date.now()}`,
-      title: `${trend.name} • Direct-to-script`,
-      trend,
-      status: "Draft" as const,
-      summary: trend.description,
-      coreMessage: "Directly translate this trend into scripts.",
-      objective: "Generate ready-to-film scripts from this cultural signal.",
-      audienceHint: "TBD",
-      platformHint: "Any",
-      formatHint: trend.formatLabel,
-      outcomeHint: "TBD",
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    setActiveBrief(brief);
-    setBriefs([...briefs, brief]);
-    router.push("/scripts");
+  const goToBriefsWithTrend = (trend: Trend) => {
+    // MVP behaviour: just pass the trend name via query.
+    // Later, we’ll wire this into BriefContext + real brief creation.
+    const params = new URLSearchParams({ trend: trend.name });
+    router.push(`/briefs?${params.toString()}`);
   };
 
   return (
-    <div className="space-y-6">
-      {/* Page header */}
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Trends</h1>
-        <p className="text-sm text-neutral-400 mt-1">
-          Browse cultural signals and turn them into angles, briefs, and
-          creator-native scripts.
-        </p>
-      </div>
+    <>
+      <div className="space-y-6">
+        {/* Header */}
+        <header className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight">Trends</h1>
+          <p className="text-sm text-neutral-400">
+            Appatize&apos;s cultural radar. In the MVP, this is curated mock
+            data that shows how the live system will feel.
+          </p>
+        </header>
 
-      {/* Search + filters (static for now) */}
-      <div className="rounded-2xl border border-neutral-800 bg-neutral-950/70 px-4 py-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div className="flex-1">
-          <input
-            type="text"
-            placeholder="Search trends, formats, keywords..."
-            className="w-full rounded-full bg-neutral-900/80 px-4 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 border border-neutral-800 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500/40"
-          />
-        </div>
-        <div className="flex items-center gap-2 text-xs">
-          <button className="rounded-full border border-neutral-700 bg-neutral-900/80 px-3 py-1 text-neutral-200">
-            All
-          </button>
-          <button className="rounded-full border border-amber-500/70 bg-amber-500/10 px-3 py-1 text-amber-300">
-            Emerging
-          </button>
-          <button className="rounded-full border border-emerald-500/60 bg-emerald-500/5 px-3 py-1 text-emerald-300">
-            Peaking
-          </button>
-          <button className="rounded-full border border-sky-500/60 bg-sky-500/5 px-3 py-1 text-sky-300">
-            Stable
-          </button>
-        </div>
-      </div>
-
-      {/* Trend cards */}
-      <div className="space-y-4">
-        {mockTrends.map((trend) => (
-          <div
-            key={trend.id}
-            className="rounded-2xl border border-neutral-800 bg-gradient-to-br from-neutral-950 via-neutral-900/60 to-neutral-950 p-5 flex flex-col gap-4"
+        {/* Helper bar */}
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-neutral-400">
+          <p>
+            Step 1 in the flow: pick a trend → turn it into a brief → generate
+            scripts.
+          </p>
+          <Link
+            href="/"
+            className="inline-flex items-center gap-1 rounded-pill border border-shell-border bg-black/20 px-3 py-1 font-medium text-neutral-200 transition-colors hover:border-brand-pink/40 hover:bg-black/40"
           >
-            <div className="flex items-start justify-between gap-4">
-              <div className="space-y-1">
-                <span className="text-[11px] font-semibold tracking-wide uppercase text-amber-300">
-                  {trend.status}
-                </span>
-                <h2 className="text-base font-semibold text-neutral-100">
-                  {trend.name}
-                </h2>
-                <p className="text-xs text-neutral-400">{trend.description}</p>
+            Back to Cultural Radar
+          </Link>
+        </div>
+
+        {/* Trends grid */}
+        <section className="grid gap-4 md:grid-cols-2">
+          {MOCK_TRENDS.map((trend) => (
+            <article
+              key={trend.id}
+              className="flex flex-col justify-between gap-3 rounded-2xl border border-shell-border bg-shell-panel/90 p-4 shadow-ring-soft transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-pink/40 hover:shadow-brand-glow/40"
+            >
+              <div className="space-y-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-1">
+                    <p
+                      className={`mb-1 text-[11px] font-medium uppercase tracking-[0.16em] ${statusClass(
+                        trend.status
+                      )}`}
+                    >
+                      {statusLabel(trend.status)}
+                    </p>
+                    <h2 className="text-sm font-semibold text-neutral-50">
+                      {trend.name}
+                    </h2>
+                    <p className="text-[11px] text-neutral-500">
+                      {trend.movementLabel}
+                    </p>
+                  </div>
+                  <span className="rounded-pill bg-black/40 px-2 py-0.5 text-[10px] text-neutral-300">
+                    {trend.category}
+                  </span>
+                </div>
+
+                <p className="text-xs text-neutral-300">{trend.description}</p>
+
+                <p className="text-[11px] text-neutral-400">
+                  Example hook:{" "}
+                  <span className="text-neutral-200">{trend.exampleHook}</span>
+                </p>
               </div>
 
-              <div className="text-right space-y-1 text-xs">
-                <p className="text-neutral-300">{trend.formatLabel}</p>
-                <p className="text-emerald-300">{trend.momentumLabel}</p>
-              </div>
-            </div>
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                <div className="text-[11px] text-neutral-500">
+                  Step into this trend with Appatize to generate
+                  creator-native angles and scripts.
+                </div>
 
-            {/* Actions */}
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                onClick={() => handleExploreAngles(trend)}
-                className="rounded-full border border-neutral-700 bg-neutral-900/90 px-3 py-1 text-[11px] font-medium text-neutral-100 hover:border-emerald-500 hover:text-emerald-200 transition-colors"
-              >
-                Explore angles
-              </button>
-              <button
-                onClick={() => handleTurnIntoBrief(trend)}
-                className="rounded-full bg-pink-500 px-3 py-1 text-[11px] font-semibold text-black hover:bg-pink-400 transition-colors"
-              >
-                Turn into brief
-              </button>
-              <button
-                onClick={() => handleJumpStraightToScript(trend)}
-                className="rounded-full bg-neutral-800 px-3 py-1 text-[11px] font-medium text-neutral-100 hover:bg-neutral-700 transition-colors"
-              >
-                Jump straight to script
-              </button>
-            </div>
-          </div>
-        ))}
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openAngles(trend)}
+                    className="inline-flex items-center gap-1 rounded-pill border border-shell-border bg-black/20 px-3 py-1 text-[11px] font-medium text-neutral-200 transition-colors hover:border-brand-pink/40 hover:bg-black/40"
+                  >
+                    View angles
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => goToBriefsWithTrend(trend)}
+                    className="inline-flex items-center gap-1 rounded-pill bg-brand-pink px-3 py-1 text-[11px] font-semibold text-black transition-colors hover:bg-brand-pink-soft"
+                  >
+                    Turn into brief
+                    <span className="text-xs">↗</span>
+                  </button>
+                </div>
+              </div>
+            </article>
+          ))}
+        </section>
       </div>
 
-      {/* Angles panel for selected trend */}
+      {/* Angles modal */}
       {selectedTrend && (
-        <div className="mt-6 rounded-2xl border border-neutral-800 bg-neutral-950/80 p-5 space-y-4">
-          <div className="flex items-center justify-between gap-2">
-            <div>
-              <h2 className="text-sm font-semibold text-neutral-100">
-                Angles for:{" "}
-                <span className="text-emerald-400">{selectedTrend.name}</span>
-              </h2>
-              <p className="text-[11px] text-neutral-400 mt-1">
-                Pick an angle to turn this trend into an angle-powered brief and
-                scripts.
-              </p>
-            </div>
-            <button
-              onClick={() => {
-                setSelectedTrend(null);
-                setAngles([]);
-                setAnglesError(null);
-              }}
-              className="text-[11px] text-neutral-400 hover:text-neutral-200"
-            >
-              Close
-            </button>
-          </div>
-
-          {/* Loading / error / angles states */}
-          {isLoadingAngles && (
-            <div className="text-[11px] text-neutral-400">
-              Generating angles…
-            </div>
-          )}
-
-          {anglesError && (
-            <div className="text-[11px] text-rose-300">{anglesError}</div>
-          )}
-
-          {!isLoadingAngles && !anglesError && angles.length === 0 && (
-            <div className="text-[11px] text-neutral-400">
-              No angles available yet. Try generating again or pick another
-              trend.
-            </div>
-          )}
-
-          {angles.length > 0 && (
-            <div className="grid gap-3 md:grid-cols-2">
-              {angles.map((angle) => (
-                <AngleCard
-                  key={angle.id}
-                  angle={angle}
-                  trendName={selectedTrend.name}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+        <FullAnglesModal trend={selectedTrend} onClose={closeAngles} />
       )}
-    </div>
+    </>
   );
 }

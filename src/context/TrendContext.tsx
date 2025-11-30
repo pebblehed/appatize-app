@@ -14,6 +14,16 @@ interface TrendContextValue {
   setSelectedTrend: (t: Trend | null) => void;
 }
 
+/**
+ * TrendContext
+ *
+ * Holds the globally selected Trend that the user is working with.
+ * Flow:
+ *   TrendsPage       → setSelectedTrend(trend)
+ *   AngleCard        → reads selectedTrend + angle → generateBriefFromAngle(...)
+ *   BriefContext     → stores activeBrief
+ *   ScriptsPage      → generates scripts from activeBrief
+ */
 const TrendContext = createContext<TrendContextValue | undefined>(undefined);
 
 export function TrendProvider({ children }: { children: ReactNode }) {

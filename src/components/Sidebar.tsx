@@ -16,16 +16,16 @@ export default function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="flex w-56 flex-col border-r border-shell-border bg-black/40 px-4 py-4">
+    <aside className="flex w-56 flex-col border-r border-shell-border bg-shell-panel/80 px-4 py-4">
       {/* Logo */}
       <div className="flex items-center gap-2 px-1">
         <div className="h-7 w-7 rounded-full bg-gradient-to-br from-brand-pink via-brand-amber to-brand-pink shadow-brand-glow" />
         <div className="flex flex-col">
           <span className="text-xs font-semibold tracking-wide">
-            CultureOS
+            Appatize
           </span>
           <span className="text-[10px] uppercase tracking-[0.16em] text-neutral-400">
-            Trend • UGC • OS
+            Trend · Brief · Script
           </span>
         </div>
       </div>

@@ -1,6 +1,6 @@
 @import "tailwindcss";
 
-/* CultureOS theme tokens (Tailwind v4, CSS-first) */
+/* Appatize theme tokens (Tailwind v4, CSS-first) */
 @theme {
   /* Shell colours */
   --color-shell-bg: #050509;
@@ -35,6 +35,9 @@
 
 body {
   @apply bg-shell-bg text-neutral-50;
+
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
 }
 
 /* Simple scrollbar polish (optional) */
