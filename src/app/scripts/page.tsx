@@ -1,236 +1,172 @@
-// src/app/scripts/page.tsx
+// app/scripts/page.tsx
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import React, { useEffect, useState } from "react";
 import { useBriefContext } from "@/context/BriefContext";
-import { describePlatformPatternForBrief } from "@/engine/platforms";
+import VariantTabs, {
+  ScriptVariant,
+} from "@/components/variant/VariantsTabs"; // 👈 folder name fixed
+import ScriptOutput from "@/app/scripts/ScriptOutput"; // 👈 correct path for your file
 
 export default function ScriptsPage() {
-  const router = useRouter();
   const { activeBrief } = useBriefContext();
 
-  const [generatedScript, setGeneratedScript] = useState<string>("");
-  const [hasGenerated, setHasGenerated] = useState(false);
+  const [variants, setVariants] = useState<ScriptVariant[]>([]);
+  const [activeVariantId, setActiveVariantId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // If there is no active brief, send the user back to /briefs
+  // 🔁 Stage C: generate ALL variants once from the active brief
   useEffect(() => {
     if (!activeBrief) {
-      router.replace("/briefs");
+      setVariants([]);
+      setActiveVariantId(null);
+      setErrorMsg(null);
+      return;
     }
-  }, [activeBrief, router]);
 
+    let cancelled = false;
+
+    async function generateVariants() {
+      setIsLoading(true);
+      setErrorMsg(null);
+
+      try {
+        // ✅ This matches app/api/scripts/generate/route.ts → /api/scripts/generate
+        const res = await fetch("/api/scripts/generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ brief: activeBrief }),
+        });
+
+        if (!res.ok) {
+          throw new Error(`Failed to generate variants (${res.status})`);
+        }
+
+        const data = (await res.json()) as { variants: ScriptVariant[] };
+
+        if (cancelled) return;
+
+        const normalized =
+          (data.variants || []).map((v, index) => ({
+            id: v.id ?? `variant-${index + 1}`,
+            label: v.label ?? `Variant ${index + 1}`,
+            body: v.body ?? "",
+            angleName: v.angleName,
+            notes: v.notes,
+          })) ?? [];
+
+        setVariants(normalized);
+
+        if (normalized.length > 0) {
+          setActiveVariantId(normalized[0].id);
+        } else {
+          setActiveVariantId(null);
+        }
+      } catch (err) {
+        console.error(err);
+        if (!cancelled) {
+          setVariants([]);
+          setActiveVariantId(null);
+          setErrorMsg(
+            "Something went wrong while generating script variants. Please try again."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      }
+    }
+
+    generateVariants();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeBrief]);
+
+  const activeVariant =
+    variants.find((v) => v.id === activeVariantId) || null;
+
+  // 🔹 Guard: no active brief yet
   if (!activeBrief) {
     return (
-      <div className="p-6 text-sm text-neutral-500">
-        Redirecting… (No active brief selected)
+      <div className="space-y-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight text-neutral-50">
+            Script Variants
+          </h1>
+          <p className="text-sm text-neutral-400">
+            Start by creating or selecting a brief. Once a brief is active,
+            Appatize will generate all your script variants in one go.
+          </p>
+        </div>
+
+        <div className="rounded-xl border border-dashed border-neutral-800 bg-neutral-950/70 p-4">
+          <p className="text-sm text-neutral-500">
+            No brief selected yet. Go to{" "}
+            <span className="font-medium text-neutral-200">Briefs</span> to
+            create or activate one.
+          </p>
+        </div>
       </div>
     );
   }
 
-  /**
-   * Core engine step:
-   * Brief → platform-aware script skeleton.
-   *
-   * Uses the platform intelligence layer to describe how this
-   * script should behave on TikTok / X / LinkedIn / etc, then
-   * wraps it in an MVP-friendly structure.
-   */
-  const buildScriptFromBrief = () => {
-    const lines: string[] = [];
-
-    const {
-      title,
-      trend,
-      objective,
-      audienceHint,
-      platformHint,
-      formatHint,
-      outcomeHint,
-    } = activeBrief;
-
-    // Header / context
-    lines.push(`Script for: ${title}`);
-    lines.push("");
-
-    if (trend) {
-      lines.push(
-        `Trend: ${
-          typeof trend === "string" ? trend : `${trend.name} (${trend.status})`
-        }`
-      );
-    }
-
-    if (objective) {
-      lines.push(`Objective: ${objective}`);
-    }
-
-    if (audienceHint) {
-      lines.push(`Audience: ${audienceHint}`);
-    }
-
-    if (platformHint) {
-      lines.push(`Platform: ${platformHint}`);
-    }
-
-    if (formatHint) {
-      lines.push(`Format: ${formatHint}`);
-    }
-
-    if (outcomeHint) {
-      lines.push(`Desired outcome: ${outcomeHint}`);
-    }
-
-    lines.push("");
-    lines.push("---");
-    lines.push("");
-
-    // Platform intelligence: narrative pattern for TikTok / X / LinkedIn / etc.
-    const platformPatternLines = describePlatformPatternForBrief(activeBrief);
-    lines.push(...platformPatternLines);
-
-    lines.push("");
-    lines.push("---");
-    lines.push("");
-
-    // MVP note – this is where the real models will plug in.
-    lines.push(
-      "// In the live Appatize engine, this pattern will be filled with concrete hooks, beats and lines generated by the cultural intelligence models."
-    );
-
-    return lines.join("\n");
-  };
-
-  const handleGenerateScript = () => {
-    const script = buildScriptFromBrief();
-    setGeneratedScript(script);
-    setHasGenerated(true);
-  };
-
   return (
-    <div className="space-y-8">
+    <div className="space-y-4">
       {/* Header */}
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">
-          Script Generator
+      <div className="flex flex-col gap-1">
+        <h1 className="text-2xl font-semibold tracking-tight text-neutral-50">
+          Script Variants
         </h1>
         <p className="text-sm text-neutral-400">
-          Turning your brief into platform-native, creator-style scripts. This
-          is the MVP view of the Appatize engine.
+          All variants are generated in one run from your active brief. Flip
+          through them with the tabs and choose the one that hits the moment.
         </p>
-      </header>
+      </div>
 
-      {/* Brief summary card */}
-      <section className="rounded-2xl border border-shell-border bg-shell-panel/90 p-5 shadow-ring-soft">
-        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
-          <div className="space-y-2">
-            <h2 className="text-sm font-semibold text-neutral-100">
-              {activeBrief.title}
-            </h2>
-
-            {activeBrief.trend && (
-              <p className="text-[11px] text-neutral-400">
-                Trend:{" "}
-                <span className="font-medium text-neutral-100">
-                  {typeof activeBrief.trend === "string"
-                    ? activeBrief.trend
-                    : activeBrief.trend.name}
-                </span>
-              </p>
-            )}
-
-            {activeBrief.objective && (
-              <p className="text-[11px] text-neutral-400">
-                Objective:{" "}
-                <span className="font-medium text-neutral-100">
-                  {activeBrief.objective}
-                </span>
-              </p>
-            )}
-
-            {activeBrief.audienceHint && (
-              <p className="text-[11px] text-neutral-400">
-                Audience:{" "}
-                <span className="font-medium text-neutral-100">
-                  {activeBrief.audienceHint}
-                </span>
-              </p>
-            )}
-
-            {activeBrief.platformHint && (
-              <p className="text-[11px] text-neutral-400">
-                Platform:{" "}
-                <span className="font-medium text-neutral-100">
-                  {activeBrief.platformHint}
-                </span>
-              </p>
-            )}
-
-            {activeBrief.formatHint && (
-              <p className="text-[11px] text-neutral-400">
-                Format:{" "}
-                <span className="font-medium text-neutral-100">
-                  {activeBrief.formatHint}
-                </span>
-              </p>
-            )}
-          </div>
-
-          <div className="flex flex-col items-end gap-2 text-[11px] text-neutral-500">
-            {activeBrief.status && (
-              <span className="inline-flex items-center rounded-full bg-black/40 px-2 py-0.5 text-[10px] font-medium text-neutral-300">
-                {activeBrief.status}
-              </span>
-            )}
-            {activeBrief.createdAt && (
-              <span>
-                {new Date(activeBrief.createdAt).toLocaleDateString()}
-              </span>
-            )}
-          </div>
-        </div>
-
-        {/* Actions */}
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={handleGenerateScript}
-            className="inline-flex items-center gap-1 rounded-pill bg-brand-pink px-4 py-2 text-[11px] font-semibold text-black transition-colors hover:bg-brand-pink-soft"
-          >
-            {hasGenerated ? "Regenerate script" : "Generate script"}
-            <span className="text-xs">⚡</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => router.push("/briefs")}
-            className="inline-flex items-center gap-1 rounded-pill border border-shell-border bg-black/20 px-3 py-2 text-[11px] font-medium text-neutral-200 transition-colors hover:border-brand-pink/40 hover:bg-black/40"
-          >
-            Back to briefs
-          </button>
-        </div>
-      </section>
-
-      {/* Generated script editor */}
-      <section className="space-y-2">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-medium text-neutral-100">
-            Script draft
-          </h2>
-          <p className="text-[11px] text-neutral-500">
-            You can edit this draft manually after generation.
+      {/* Brief meta */}
+      <div className="rounded-xl border border-neutral-800 bg-neutral-950/80 p-3 text-xs text-neutral-400 flex flex-wrap justify-between gap-2">
+        <div className="space-y-0.5">
+          <p className="font-medium text-neutral-200 line-clamp-1">
+            {activeBrief.title ?? "Untitled brief"}
           </p>
+          {activeBrief.platform && (
+            <p className="line-clamp-1">
+              Platform:{" "}
+              <span className="text-neutral-200">{activeBrief.platform}</span>
+            </p>
+          )}
         </div>
+        {activeBrief.objective && (
+          <p className="max-w-xs text-right line-clamp-2">
+            Objective:{" "}
+            <span className="text-neutral-200">
+              {activeBrief.objective}
+            </span>
+          </p>
+        )}
+      </div>
 
-        <div className="rounded-2xl border border-shell-border bg-shell-panel/90 p-4 shadow-ring-soft">
-          <textarea
-            value={generatedScript}
-            onChange={(e) => setGeneratedScript(e.target.value)}
-            placeholder="Click &quot;Generate script&quot; to create a first draft based on your brief..."
-            className="h-64 w-full resize-y border-none bg-transparent text-xs text-neutral-100 outline-none focus:ring-0"
-          />
+      {/* Error */}
+      {errorMsg && (
+        <div className="rounded-xl border border-red-700/70 bg-red-950/40 p-3 text-sm text-red-200">
+          {errorMsg}
         </div>
-      </section>
+      )}
+
+      {/* Variant tabs */}
+      <VariantTabs
+        variants={variants}
+        activeVariantId={activeVariantId}
+        onChange={setActiveVariantId}
+        isDisabled={isLoading || variants.length === 0}
+      />
+
+      {/* Output */}
+      <ScriptOutput variant={activeVariant} isLoading={isLoading} />
     </div>
   );
 }

@@ -6,6 +6,8 @@ import React, {
   useContext,
   useState,
   ReactNode,
+  Dispatch,
+  SetStateAction,
 } from "react";
 
 /**
@@ -56,6 +58,10 @@ export interface Brief {
   formatHint?: string;
   outcomeHint?: string;
 
+  // Explicit override for engine platform (TikTok / X / LinkedIn / Snapchat, etc.)
+  // If undefined, the engine infers from platformHint/formatHint.
+  platformOverride?: string;
+
   createdAt: string;
   updatedAt: string;
 }
@@ -68,9 +74,10 @@ interface BriefContextValue {
   activeBrief: Brief | null;
   setActiveBrief: (brief: Brief | null) => void;
   briefs: Brief[];
-  setBriefs: (briefs: Brief[]) => void;
+  // IMPORTANT: allow both value and functional updater forms
+  setBriefs: Dispatch<SetStateAction<Brief[]>>;
 
-  // Appatize engine helper: Trend + Angle → creative Brief
+  // Engine helper: Trend + Angle → Appatize creative Brief
   generateBriefFromAngle: (trend: Trend, angle: Angle) => Brief;
 }
 
@@ -106,6 +113,9 @@ export function BriefProvider({ children }: { children: ReactNode }) {
       platformHint: angle.platform,
       formatHint: angle.format,
       outcomeHint: angle.outcome,
+
+      // No override by default – engine uses hints.
+      platformOverride: undefined,
 
       createdAt: now,
       updatedAt: now,
