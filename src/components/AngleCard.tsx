@@ -4,6 +4,7 @@
 import { useRouter } from "next/navigation";
 import { useTrendContext } from "@/context/TrendContext";
 import { useBriefContext, type Angle } from "@/context/BriefContext";
+import { cleanText } from "@/engine/cleanText";
 
 type AngleCardProps = {
   angle: Angle;
@@ -35,21 +36,29 @@ export default function AngleCard({ angle, trendName }: AngleCardProps) {
     router.push("/scripts");
   };
 
+  const labelText = cleanText(angle.label);
+  const hookText = cleanText(angle.hook);
+  const audienceText = angle.audience ? cleanText(angle.audience) : null;
+  const outcomeText = angle.outcome ? cleanText(angle.outcome) : null;
+  const notesText = angle.notes ? cleanText(angle.notes) : null;
+
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-shell-border bg-shell-panel/90 p-4 shadow-ring-soft transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-pink/40 hover:shadow-brand-glow/40">
       {/* Angle label + platform/format pill row */}
       <div className="flex items-start justify-between gap-2">
         <div className="space-y-1">
           <h3 className="text-sm font-medium text-neutral-100">
-            {angle.label}
+            {labelText}
           </h3>
 
-          <p className="text-xs text-neutral-400">{angle.hook}</p>
+          <p className="text-xs text-neutral-400">{hookText}</p>
 
           {trendName && (
             <p className="text-[10px] text-neutral-500">
               From trend:{" "}
-              <span className="font-medium text-neutral-200">{trendName}</span>
+              <span className="font-medium text-neutral-200">
+                {trendName}
+              </span>
             </p>
           )}
         </div>
@@ -61,26 +70,26 @@ export default function AngleCard({ angle, trendName }: AngleCardProps) {
 
       {/* Outcome / notes */}
       <div className="space-y-1">
-        {angle.audience && (
+        {audienceText && (
           <p className="text-[11px] text-neutral-300">
             Audience:{" "}
             <span className="font-medium text-neutral-100">
-              {angle.audience}
+              {audienceText}
             </span>
           </p>
         )}
 
-        {angle.outcome && (
+        {outcomeText && (
           <p className="text-[11px] text-neutral-300">
             Outcome:{" "}
             <span className="font-medium text-neutral-100">
-              {angle.outcome}
+              {outcomeText}
             </span>
           </p>
         )}
 
-        {angle.notes && (
-          <p className="text-[11px] text-neutral-400">{angle.notes}</p>
+        {notesText && (
+          <p className="text-[11px] text-neutral-400">{notesText}</p>
         )}
       </div>
 

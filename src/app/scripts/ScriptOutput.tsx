@@ -1,8 +1,9 @@
-// components/scripts/ScriptOutput.tsx
+// src/app/scripts/ScriptOutput.tsx
 "use client";
 
 import React from "react";
-import type { ScriptVariant } from "@/components/variants/VariantTabs";
+import type { ScriptVariant } from "@/components/variant/VariantsTabs";
+import { cleanText } from "@/engine/cleanText";
 
 type ScriptOutputProps = {
   variant: ScriptVariant | null;
@@ -37,10 +38,17 @@ export default function ScriptOutput({
     );
   }
 
+  const labelText = cleanText(variant.label);
+  const angleNameText = variant.angleName
+    ? cleanText(variant.angleName)
+    : null;
+  const notesText = variant.notes ? cleanText(variant.notes) : null;
+  const bodyText = cleanText(variant.body ?? "");
+
   const handleCopy = () => {
-    if (!variant.body) return;
-    navigator.clipboard.writeText(variant.body).catch(() => {
-      // Quietly ignore clipboard errors – UX stays smooth
+    if (!bodyText) return;
+    navigator.clipboard.writeText(bodyText).catch(() => {
+      // quietly ignore clipboard errors
     });
   };
 
@@ -50,14 +58,23 @@ export default function ScriptOutput({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="space-y-0.5">
           <h2 className="text-sm font-semibold text-neutral-100">
-            {variant.label}
+            {labelText}
           </h2>
-          {variant.angleName && (
-            <p className="text-xs text-neutral-400">
-              Angle:{" "}
-              <span className="text-neutral-200">{variant.angleName}</span>
-            </p>
-          )}
+
+          <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-400">
+            {angleNameText && (
+              <span>
+                Angle:{" "}
+                <span className="text-neutral-200">{angleNameText}</span>
+              </span>
+            )}
+            {typeof variant.score === "number" && (
+              <span className="inline-flex items-center gap-1 rounded-full border border-purple-500/60 bg-purple-500/10 px-2 py-0.5 text-[11px] text-purple-100">
+                <span className="h-1.5 w-1.5 rounded-full bg-purple-400" />
+                Appatize score: {variant.score.toFixed(1)}/10
+              </span>
+            )}
+          </div>
         </div>
 
         <button
@@ -69,14 +86,14 @@ export default function ScriptOutput({
         </button>
       </div>
 
-      {/* Optional notes */}
-      {variant.notes && (
-        <p className="text-xs text-neutral-400 italic">{variant.notes}</p>
+      {/* Notes */}
+      {notesText && (
+        <p className="text-xs text-neutral-400 italic">{notesText}</p>
       )}
 
       {/* Body */}
       <pre className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-neutral-100">
-        {variant.body}
+        {bodyText}
       </pre>
     </div>
   );

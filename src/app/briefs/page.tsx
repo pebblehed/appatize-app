@@ -10,6 +10,7 @@ import {
   PLATFORM_PATTERNS,
   type PlatformId,
 } from "@/engine/platforms";
+import { cleanText } from "@/engine/cleanText";
 
 type PlatformSelectValue = "auto" | PlatformId;
 
@@ -103,6 +104,29 @@ export default function BriefsPage() {
                 ? PLATFORM_PATTERNS[inferredPlatformId].shortLabel
                 : brief.platformHint || "Auto";
 
+            // Cleaned display fields (hyphen / AI-detox pass)
+            const titleText = cleanText(brief.title || "Untitled brief");
+
+            const trendNameRaw =
+              typeof brief.trend === "string"
+                ? brief.trend
+                : brief.trend?.name;
+            const trendNameText = trendNameRaw
+              ? cleanText(trendNameRaw)
+              : null;
+
+            const objectiveText = brief.objective
+              ? cleanText(brief.objective)
+              : null;
+
+            const summaryText = brief.summary
+              ? cleanText(brief.summary)
+              : null;
+
+            const audienceText = brief.audienceHint
+              ? cleanText(brief.audienceHint)
+              : null;
+
             return (
               <div
                 key={brief.id}
@@ -116,23 +140,21 @@ export default function BriefsPage() {
                 <div className="flex items-start justify-between gap-3">
                   <div className="space-y-1">
                     <h2 className="text-sm font-semibold text-neutral-100">
-                      {brief.title}
+                      {titleText}
                     </h2>
-                    {brief.trend && (
+                    {trendNameText && (
                       <p className="text-[11px] text-neutral-400">
                         Trend:{" "}
                         <span className="font-medium text-neutral-100">
-                          {typeof brief.trend === "string"
-                            ? brief.trend
-                            : brief.trend.name}
+                          {trendNameText}
                         </span>
                       </p>
                     )}
-                    {brief.objective && (
+                    {objectiveText && (
                       <p className="text-[11px] text-neutral-400">
                         Objective:{" "}
                         <span className="font-medium text-neutral-100">
-                          {brief.objective}
+                          {objectiveText}
                         </span>
                       </p>
                     )}
@@ -150,19 +172,19 @@ export default function BriefsPage() {
                   </div>
                 </div>
 
-                {brief.summary && (
+                {summaryText && (
                   <p className="text-xs text-neutral-300">
-                    {brief.summary}
+                    {summaryText}
                   </p>
                 )}
 
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                   <div className="flex flex-col gap-1 text-[11px] text-neutral-500">
-                    {brief.audienceHint && (
+                    {audienceText && (
                       <div>
                         Audience:{" "}
                         <span className="text-neutral-200">
-                          {brief.audienceHint}
+                          {audienceText}
                         </span>
                       </div>
                     )}
