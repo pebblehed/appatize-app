@@ -5,151 +5,196 @@ import React, {
   createContext,
   useContext,
   useState,
-  ReactNode,
-  Dispatch,
-  SetStateAction,
+  type ReactNode,
 } from "react";
+import type { BehaviourControlsInput } from "@/lib/intelligence/types";
 
-/**
- * Core engine types
- */
-
-export type TrendStatus = "Emerging" | "Peaking" | "Stable";
-
-export interface Trend {
-  id: string;
-  status: TrendStatus;
-  name: string; // canonical trend name (what ScriptsPage will use)
-  description: string;
-  formatLabel: string;
-  momentumLabel: string;
-  category?: string;
-}
-
-export interface Angle {
-  id: string;
-  label: string; // e.g. "Street POV vlogs for founders"
-  hook: string; // narrative POV / core idea
-  format: string; // e.g. "Short-form video"
-  platform: string; // e.g. "TikTok"
-  audience: string; // e.g. "Busy founders"
-  outcome: string; // e.g. "Drive DMs"
-  notes?: string;
-}
-
+// 🔹 Core brief shape for the app.
 export interface Brief {
   id: string;
   title: string;
-
-  // Engine core: the originating trend + angle
-  trend: Trend;
-  angle?: Angle;
-
-  status: "Draft" | "Active" | "Archived";
-
-  // Strategy layer
-  summary?: string;
-  coreMessage?: string;
   objective?: string;
-
-  // Hints to guide script generation
-  audienceHint?: string;
+  trendLabel?: string;
+  audience?: string;
   platformHint?: string;
-  formatHint?: string;
-  outcomeHint?: string;
-
-  // Explicit override for engine platform (TikTok / X / LinkedIn / Snapchat, etc.)
-  // If undefined, the engine infers from platformHint/formatHint.
   platformOverride?: string;
-
-  createdAt: string;
-  updatedAt: string;
+  enhancedBrief?: string;
+  description?: string;
+  // Allow extra properties
+  [key: string]: any;
 }
 
-/**
- * Context value shape
- */
+// Minimal shape of an angle coming from the engine / UI.
+type AngleLike = {
+  id?: string;
+  title?: string;
+  pov?: string;
+  platform?: string;
+  culturalTrigger?: string;
+  audienceHook?: string;
+  narrativePattern?: string;
+  energy?: string;
+  // Loose bag for anything else coming from the engine
+  [key: string]: any;
+};
 
-interface BriefContextValue {
+// 🔹 Exported so AngleCard can import `type Angle`
+export type Angle = AngleLike;
+
+type BehaviourControlsState = BehaviourControlsInput | null;
+
+type BriefContextValue = {
+  briefs: Brief[];
+  setBriefs: (briefs: Brief[]) => void;
+
   activeBrief: Brief | null;
   setActiveBrief: (brief: Brief | null) => void;
-  briefs: Brief[];
-  // IMPORTANT: allow both value and functional updater forms
-  setBriefs: Dispatch<SetStateAction<Brief[]>>;
 
-  // Engine helper: Trend + Angle → Appatize creative Brief
-  generateBriefFromAngle: (trend: Trend, angle: Angle) => Brief;
-}
+  behaviourControls: BehaviourControlsState;
+  setBehaviourControls: (value: BehaviourControlsState) => void;
 
-/**
- * Context + Provider
- */
+  /**
+   * Used by AngleCard "Use this angle".
+   * Takes the currently selected trend + chosen angle
+   * and creates/updates an active brief that flows into the
+   * intelligence layer on /scripts.
+   */
+  generateBriefFromAngle: (trend: any, angle: AngleLike) => void;
+};
 
 const BriefContext = createContext<BriefContextValue | undefined>(undefined);
 
 export function BriefProvider({ children }: { children: ReactNode }) {
-  const [activeBrief, setActiveBrief] = useState<Brief | null>(null);
   const [briefs, setBriefs] = useState<Brief[]>([]);
+  const [activeBrief, setActiveBrief] = useState<Brief | null>(null);
 
-  const generateBriefFromAngle = (trend: Trend, angle: Angle): Brief => {
-    const now = new Date().toISOString();
+  // Global Behaviour Controls state
+  const [behaviourControls, setBehaviourControls] =
+    useState<BehaviourControlsState>(null);
 
-    const brief: Brief = {
-      id: `brief-${trend.id}-${angle.id}-${Date.now()}`,
-      title: `${angle.label} • ${trend.name}`,
-      trend,
-      angle,
-      status: "Draft",
+  /**
+   * Trend + Angle → Brief
+   *
+   * - If an activeBrief exists, we enrich it with the selected angle.
+   * - Otherwise, we create a new brief using trend + angle info.
+   */
+  const generateBriefFromAngle = (trend: any, angle: AngleLike) => {
+    // Base brief:
+    // - Prefer the current activeBrief (so we keep user edits)
+    // - Otherwise, build from the selected trend if present
+    const baseBrief: Brief | null =
+      activeBrief ??
+      (trend
+        ? {
+            id: trend.id ?? `trend-${Date.now()}`,
+            title:
+              trend.title ||
+              trend.name ||
+              angle.title ||
+              "Angle-selected brief",
+            trendLabel:
+              trend.trendLabel ||
+              trend.name ||
+              trend.title ||
+              angle.title,
+            platformHint:
+              trend.platform ||
+              trend.channel ||
+              angle.platform ||
+              undefined,
+          }
+        : null);
 
-      summary: `Angle "${angle.label}" on trend "${trend.name}" targeting ${angle.audience}.`,
-      coreMessage:
-        angle.hook ||
-        "Turn this cultural signal into creator-native content that feels inevitable.",
+    // Use the internal helper to merge in angle metadata
+    const newBrief = buildBriefFromAngle(angle, baseBrief);
 
-      objective:
-        angle.outcome || "Drive meaningful action from the right audience.",
+    // Add to list + set active
+    setBriefs((prev) => [newBrief, ...prev]);
+    setActiveBrief(newBrief);
+  };
 
-      audienceHint: angle.audience,
-      platformHint: angle.platform,
-      formatHint: angle.format,
-      outcomeHint: angle.outcome,
-
-      // No override by default – engine uses hints.
-      platformOverride: undefined,
-
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    setActiveBrief(brief);
-    setBriefs((prev) => [...prev, brief]);
-
-    return brief;
+  const value: BriefContextValue = {
+    briefs,
+    setBriefs,
+    activeBrief,
+    setActiveBrief,
+    behaviourControls,
+    setBehaviourControls,
+    generateBriefFromAngle,
   };
 
   return (
-    <BriefContext.Provider
-      value={{
-        activeBrief,
-        setActiveBrief,
-        briefs,
-        setBriefs,
-        generateBriefFromAngle,
-      }}
-    >
+    <BriefContext.Provider value={value}>
       {children}
     </BriefContext.Provider>
   );
 }
 
-/**
- * Hook
- */
-
 export function useBriefContext(): BriefContextValue {
   const ctx = useContext(BriefContext);
   if (!ctx) {
-    throw new Error("useBriefContext must be used inside BriefProvider");
+    throw new Error("useBriefContext must be used within a BriefProvider");
   }
   return ctx;
+}
+
+/**
+ * buildBriefFromAngle (internal helper)
+ *
+ * Takes the chosen angle + a base brief and returns a new brief
+ * enriched with angle metadata, ready for the intelligence layer.
+ */
+function buildBriefFromAngle(
+  angle: AngleLike,
+  baseBrief: Brief | null
+): Brief {
+  const safeBase: Brief =
+    baseBrief ?? {
+      id: angle.id || "angle-brief",
+      title: angle.title || "Angle-selected brief",
+    };
+
+  const mergedDescription =
+    safeBase.enhancedBrief ||
+    safeBase.description ||
+    "";
+
+  const angleSummaryParts: string[] = [];
+
+  if (angle.pov) {
+    angleSummaryParts.push(`POV: ${angle.pov}`);
+  }
+  if (angle.culturalTrigger) {
+    angleSummaryParts.push(`Cultural trigger: ${angle.culturalTrigger}`);
+  }
+  if (angle.audienceHook) {
+    angleSummaryParts.push(`Audience hook: ${angle.audienceHook}`);
+  }
+  if (angle.narrativePattern) {
+    angleSummaryParts.push(`Narrative pattern: ${angle.narrativePattern}`);
+  }
+  if (angle.energy) {
+    angleSummaryParts.push(`Energy: ${angle.energy}`);
+  }
+
+  const angleSummary =
+    angleSummaryParts.length > 0
+      ? `\n\n[Selected angle]\n${angleSummaryParts.join("\n")}`
+      : "";
+
+  return {
+    ...safeBase,
+    id: safeBase.id,
+    title: safeBase.title || angle.title || "Angle-selected brief",
+    trendLabel: safeBase.trendLabel ?? angle.title ?? safeBase.title,
+    platformHint:
+      safeBase.platformHint ?? angle.platform ?? safeBase.platformHint,
+    enhancedBrief:
+      mergedDescription.length > 0
+        ? `${mergedDescription}${angleSummary}`
+        : angleSummary || mergedDescription,
+    selectedAngleId: angle.id,
+    selectedAngleTitle: angle.title,
+    selectedAnglePov: angle.pov,
+  };
 }

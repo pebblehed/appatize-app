@@ -8,6 +8,9 @@ import VariantTabs, {
 } from "@/components/variant/VariantsTabs";
 import ScriptOutput from "./ScriptOutput";
 import { cleanText } from "@/engine/cleanText";
+import AngleTabs from "@/components/scripts/AngleTabs";
+import CulturalSnapshot from "@/components/scripts/CulturalSnapshot";
+import MomentSignalPanel from "@/components/scripts/MomentSignalPanel";
 
 type CulturalInsight = {
   culturalContext?: string;
@@ -16,8 +19,23 @@ type CulturalInsight = {
   creativePrinciple?: string;
 };
 
+type AngleGroup = {
+  key: string; // grouping key (we'll use angleName)
+  title: string; // raw angle title from the engine
+  label: string; // "Angle A: Street POV micro-vlogs"
+};
+
+// This is just the data shape that comes back from the API for the moment signal
+type MomentSignalData = {
+  coreMoment?: string;
+  culturalTension?: string;
+  stakes?: string;
+  contentRole?: string;
+  watchouts?: string;
+} | null;
+
 export default function ScriptsPage() {
-  const { activeBrief } = useBriefContext();
+  const { activeBrief, behaviourControls } = useBriefContext();
 
   const [variants, setVariants] = useState<ScriptVariant[]>([]);
   const [activeVariantId, setActiveVariantId] = useState<string | null>(null);
@@ -27,8 +45,14 @@ export default function ScriptsPage() {
   const [culturalInsight, setCulturalInsight] = useState<
     CulturalInsight | null
   >(null);
+  const [momentSignal, setMomentSignal] = useState<MomentSignalData>(null);
+
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Angle grouping + active angle
+  const [angleGroups, setAngleGroups] = useState<AngleGroup[]>([]);
+  const [activeAngleKey, setActiveAngleKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (!activeBrief) {
@@ -36,7 +60,10 @@ export default function ScriptsPage() {
       setActiveVariantId(null);
       setRecommendedVariantId(null);
       setCulturalInsight(null);
+      setMomentSignal(null);
       setErrorMsg(null);
+      setAngleGroups([]);
+      setActiveAngleKey(null);
       return;
     }
 
@@ -46,12 +73,18 @@ export default function ScriptsPage() {
       setIsLoading(true);
       setErrorMsg(null);
       setCulturalInsight(null);
+      setMomentSignal(null);
+      setAngleGroups([]);
+      setActiveAngleKey(null);
 
       try {
-        const res = await fetch("/api/scripts/generate", {
+        const res = await fetch("/api/scripts/intelligence", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ brief: activeBrief }),
+          body: JSON.stringify({
+            brief: activeBrief,
+            behaviour: behaviourControls ?? undefined,
+          }),
         });
 
         if (!res.ok) {
@@ -60,7 +93,9 @@ export default function ScriptsPage() {
             const errJson = await res.json();
             apiMessage =
               typeof errJson?.error === "string" ? errJson.error : undefined;
-          } catch {}
+          } catch {
+            // ignore JSON parse errors here; we'll fall back to generic
+          }
 
           if (res.status === 429) {
             throw new Error(
@@ -78,6 +113,7 @@ export default function ScriptsPage() {
         const data = (await res.json()) as {
           variants: ScriptVariant[];
           cultural?: CulturalInsight | null;
+          momentSignal?: MomentSignalData;
         };
 
         if (cancelled) return;
@@ -95,6 +131,7 @@ export default function ScriptsPage() {
                 : undefined,
           })) ?? [];
 
+        // Determine recommended variant (highest score)
         let recommended: string | null = null;
         let bestScore = -1;
 
@@ -112,6 +149,47 @@ export default function ScriptsPage() {
 
         setVariants(withRecommended);
 
+        // Build angle groups from angleName
+        const uniqueAnglesMap = new Map<string, AngleGroup>();
+
+        withRecommended.forEach((v, idx) => {
+          const rawTitle = v.angleName || `Angle ${idx + 1}`;
+          const key = rawTitle; // use the angle title as grouping key
+
+          if (!uniqueAnglesMap.has(key)) {
+            const letter = String.fromCharCode(
+              "A".charCodeAt(0) + uniqueAnglesMap.size
+            );
+            uniqueAnglesMap.set(key, {
+              key,
+              title: rawTitle,
+              label: `Angle ${letter}: ${rawTitle}`,
+            });
+          }
+        });
+
+        const groups = Array.from(uniqueAnglesMap.values());
+        setAngleGroups(groups);
+
+        // Choose initial active angle:
+        // 1) angle of recommended variant (if any)
+        // 2) otherwise first angle group
+        let initialActiveAngleKey: string | null = null;
+
+        if (recommended) {
+          const rec = withRecommended.find((v) => v.id === recommended);
+          if (rec?.angleName) {
+            initialActiveAngleKey = rec.angleName;
+          }
+        }
+
+        if (!initialActiveAngleKey && groups.length > 0) {
+          initialActiveAngleKey = groups[0].key;
+        }
+
+        setActiveAngleKey(initialActiveAngleKey);
+
+        // Set active / recommended variant IDs
         if (withRecommended.length > 0) {
           const initialActiveId = recommended ?? withRecommended[0].id;
           setActiveVariantId(initialActiveId);
@@ -122,6 +200,7 @@ export default function ScriptsPage() {
         }
 
         setCulturalInsight(data.cultural ?? null);
+        setMomentSignal(data.momentSignal ?? null);
       } catch (err) {
         console.error(err);
         if (!cancelled) {
@@ -129,6 +208,9 @@ export default function ScriptsPage() {
           setActiveVariantId(null);
           setRecommendedVariantId(null);
           setCulturalInsight(null);
+          setMomentSignal(null);
+          setAngleGroups([]);
+          setActiveAngleKey(null);
           setErrorMsg(
             err instanceof Error
               ? err.message
@@ -147,10 +229,16 @@ export default function ScriptsPage() {
     return () => {
       cancelled = true;
     };
-  }, [activeBrief]);
+  }, [activeBrief, behaviourControls]);
+
+  // Filter variants by active angle
+  const visibleVariants =
+    activeAngleKey && angleGroups.length > 0
+      ? variants.filter((v) => (v.angleName || "") === activeAngleKey)
+      : variants;
 
   const activeVariant =
-    variants.find((v) => v.id === activeVariantId) || null;
+    visibleVariants.find((v) => v.id === activeVariantId) || null;
 
   if (!activeBrief) {
     return (
@@ -180,12 +268,8 @@ export default function ScriptsPage() {
   const titleText = cleanText(activeBrief.title || "Untitled brief");
 
   const rawPlatform =
-    activeBrief.platformOverride ||
-    activeBrief.platformHint ||
-    null;
-  const platformText = rawPlatform
-    ? cleanText(String(rawPlatform))
-    : null;
+    activeBrief.platformOverride || activeBrief.platformHint || null;
+  const platformText = rawPlatform ? cleanText(String(rawPlatform)) : null;
 
   const objectiveText = activeBrief.objective
     ? cleanText(activeBrief.objective)
@@ -235,65 +319,44 @@ export default function ScriptsPage() {
         </div>
       )}
 
-      {/* Cultural Intelligence Snapshot */}
-      {culturalInsight && !errorMsg && (
-        <div className="rounded-xl border border-purple-700/60 bg-purple-950/20 p-3 space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-purple-200">
-              Cultural Intelligence Snapshot
-            </p>
-            <span className="h-1.5 w-16 rounded-full bg-purple-500/60 blur-[2px]" />
-          </div>
+      {/* Cultural Snapshot v2 */}
+      <CulturalSnapshot snapshot={culturalInsight} />
 
-          {culturalInsight.culturalContext && (
-            <p className="text-xs text-neutral-200">
-              <span className="font-semibold text-neutral-100">
-                Cultural context:
-              </span>{" "}
-              {culturalInsight.culturalContext}
-            </p>
-          )}
+      {/* Moment Signal — strategy layer */}
+      <MomentSignalPanel signal={momentSignal ?? undefined} />
 
-          {culturalInsight.momentInsight && (
-            <p className="text-xs text-neutral-200">
-              <span className="font-semibold text-neutral-100">
-                Audience / moment:
-              </span>{" "}
-              {culturalInsight.momentInsight}
-            </p>
-          )}
-
-          {culturalInsight.flowGuidance && (
-            <p className="text-xs text-neutral-200">
-              <span className="font-semibold text-neutral-100">
-                Flow guidance:
-              </span>{" "}
-              {culturalInsight.flowGuidance}
-            </p>
-          )}
-
-          {culturalInsight.creativePrinciple && (
-            <p className="text-xs text-neutral-200">
-              <span className="font-semibold text-neutral-100">
-                Creative principle:
-              </span>{" "}
-              {culturalInsight.creativePrinciple}
-            </p>
-          )}
-        </div>
+      {/* Angle tabs (Angle A/B/C with titles) */}
+      {angleGroups.length > 1 && (
+        <AngleTabs
+          angles={angleGroups.map((g) => ({
+            id: g.key,
+            label: g.label,
+          }))}
+          activeAngleId={activeAngleKey}
+          onChange={(id) => {
+            setActiveAngleKey(id);
+            // When switching angle, reset active variant to the first in that angle group (if any)
+            const firstInAngle = variants.find(
+              (v) => (v.angleName || "") === id
+            );
+            if (firstInAngle) {
+              setActiveVariantId(firstInAngle.id);
+            }
+          }}
+        />
       )}
 
-      {/* Tabs */}
+      {/* Variant tabs */}
       <VariantTabs
-        variants={variants}
+        variants={visibleVariants}
         activeVariantId={activeVariantId}
         onChange={setActiveVariantId}
-        isDisabled={isLoading || variants.length === 0}
+        isDisabled={isLoading || visibleVariants.length === 0}
         recommendedVariantId={recommendedVariantId}
       />
 
       {/* Output */}
-      <ScriptOutput variant={activeVariant} isLoading={isLoading} />
+      <ScriptOutput variant={activeVariant as any} isLoading={isLoading} />
     </div>
   );
 }
