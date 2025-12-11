@@ -1,6 +1,8 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# dependencies
+###########################
+# DEPENDENCIES
+###########################
 /node_modules
 /.pnp
 .pnp.*
@@ -10,32 +12,119 @@
 !.yarn/releases
 !.yarn/versions
 
-# testing
+###########################
+# TESTING
+###########################
 /coverage
 
-# next.js
+###########################
+# NEXT.JS BUILD ARTIFACTS
+###########################
 /.next/
 /out/
-
-# production
 /build
+/.cache
+.turbo
 
-# misc
+###########################
+# PRODUCTION BUILD OUTPUT
+###########################
+/dist
+
+###########################
+# MISC
+###########################
 .DS_Store
+Thumbs.db
 *.pem
+*.pfx
+*.p12
+*.key
+*.crt
+*.csr
+*.der
+*.jks
+*.keystore
+*.bak
+*.backup
 
-# debug
+###########################
+# DEBUG LOGS
+###########################
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+*.log
 
-# env files (can opt-in for committing if needed)
-.env*
+###########################
+# ENVIRONMENT FILES
+###########################
+.env
+.env.local
+.env.*.local
+*.env
 
-# vercel
+###########################
+# VERCEL
+###########################
 .vercel
 
-# typescript
+###########################
+# TYPESCRIPT
+###########################
 *.tsbuildinfo
 next-env.d.ts
+
+###########################
+# OS / EDITOR FILES
+###########################
+*.swp
+*.swo
+*~
+*.tmp
+.vscode/
+.idea/
+*.iml
+
+###########################
+# INTELLIGENCE LAYER LOCAL-ONLY WORK
+# (Private reasoning, prompts, scratch, and internal notes)
+###########################
+prompts_local/
+prompts_private/
+reasoning_local/
+reasoning_private/
+internal_notes/
+strategy_notes/
+notes_private/
+scratch/
+sandbox/
+tmp/
+temp/
+experiments/
+experimental/
+local_only/
+__local__/
+__scratch__/
+
+###########################
+# LOCAL DATA & GENERATED ASSETS
+###########################
+raw_data/
+datasets_local/
+exports_local/
+backups_local/
+local_images/
+test_assets/
+
+###########################
+# PDF / DOCS GENERATED LOCALLY (UNLESS INTENDED FOR REPO)
+###########################
+generated_pdfs/
+*.generated.pdf
+
+###########################
+# MUST BE TRACKED — DO NOT IGNORE
+###########################
+!IP/
