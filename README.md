@@ -1,36 +1,61 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Appatize — Cultural Operations Platform (COP)
 
-## Getting Started
+Appatize is a **Cultural Operations Platform** powered by a multi-layer
+intelligence stack:
 
-First, run the development server:
+- **CIE — Cultural Intelligence Engine**
+- **MSE — Model Shaping Environment**
+- **Trend → Angle → Brief → Script** pipeline
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+It is designed for brands, agencies, and creators who need to move at the
+speed of culture with **strategic, creator-native outputs**, not prompt spam.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+---
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## ✨ Core Concepts
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- **Cultural Intelligence Engine (CIE)**  
+  Interprets cultural signals, trend phases, and platform behaviour to
+  understand “the moment”.
 
-## Learn More
+- **Model Shaping Environment (MSE)**  
+  Applies behaviour controls (energy, tone, rhythm, platform) and strategic
+  constraints *before* generation, turning the LLM into a governed creative
+  system.
 
-To learn more about Next.js, take a look at the following resources:
+- **Operational Pipeline**  
+  `Trend → Angle → Brief → Script`  
+  A structured path from raw cultural signals to creator-native scripts that
+  feel human, contextual, and platform-ready.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+---
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 🧱 Architecture Overview
 
-## Deploy on Vercel
+High-level structure:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```text
+appatize/
+  src/
+    app/            # Next.js App Router routes
+    components/     # UI components
+    context/        # React context (trend, brief, behaviour)
+    hooks/          # Custom hooks
+    lib/
+      intelligence/ # Public-facing adapters for intelligence
+      api/          # API integration helpers
+      util/         # Utilities
+    styles/         # Global styling
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+  internal/
+    mse/            # Model Shaping Environment (behaviour curves, shaping)
+    cie/            # Cultural Intelligence Engine (signal fusion, reasoning)
+    proprietary/    # Narrative weighting, creator heuristics, deviation logic
+    research/       # Experiments (git-ignored)
+
+  IP/               # Trade secrets, ownership, legal & security docs
+  LEGAL_NOTICE.md
+  SECURITY.md
+  README.md
+  package.json
+  .gitignore
