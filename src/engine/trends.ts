@@ -7,7 +7,19 @@
 //
 // No guessing, no drift. This is the canonical version.
 
-import type { Trend, TrendStatus } from "@/context/BriefContext";
+// Canonical trend types for the engine + UI
+export type TrendStatus = "Emerging" | "Peaking" | "Stable";
+
+export type Trend = {
+  id: string;
+  status: TrendStatus;
+  name: string;
+  description: string;
+  formatLabel?: string;
+  momentumLabel?: string;
+  category?: string;
+};
+
 
 /**
  * Where a signal came from.

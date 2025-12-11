@@ -5,7 +5,10 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import FullAnglesModal from "./FullAnglesModal";
 import { useTrendContext } from "@/context/TrendContext";
-import type { Trend as CoreTrend, TrendStatus as CoreTrendStatus } from "@/context/BriefContext";
+import type {
+  Trend as CoreTrend,
+  TrendStatus as CoreTrendStatus,
+} from "@/engine/trends";
 
 /**
  * UI trend status used for styling/labels on this page.
@@ -55,7 +58,7 @@ const SOURCE_OPTIONS: {
 }[] = [
   {
     id: "mock-stage-1",
-    label: "Stage 1 mock engine",
+    label: "Internal test engine (Stage 1 mock)",
     apiPath: "/api/trends/mock",
   },
   {
@@ -164,7 +167,10 @@ export default function TrendsPage() {
   const router = useRouter();
   const { setSelectedTrend: setCoreSelectedTrend } = useTrendContext();
 
-  const [sourceId, setSourceId] = useState<TrendSourceId>("mock-stage-1");
+  // 🔹 Default to LIVE Reddit source for MVP
+  const [sourceId, setSourceId] = useState<TrendSourceId>(
+    "reddit-socialmedia-marketing"
+  );
   const [trends, setTrends] = useState<UiTrend[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -194,7 +200,9 @@ export default function TrendsPage() {
       try {
         const res = await fetch(src.apiPath);
         if (!res.ok) {
-          throw new Error(`Failed to fetch trends: ${res.status} ${res.statusText}`);
+          throw new Error(
+            `Failed to fetch trends: ${res.status} ${res.statusText}`
+          );
         }
 
         const data = (await res.json()) as TrendsApiResponse;
@@ -248,16 +256,17 @@ export default function TrendsPage() {
         <header className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">Trends</h1>
           <p className="text-sm text-neutral-400">
-            Appatize&apos;s cultural radar. Powered by interpreted trends from the mock
-            engine and live Reddit topics, in the same shape we&apos;ll use for future
-            signals.
+            Appatize&apos;s cultural radar surface. This page runs on interpreted
+            trends from our internal mock engine and live Reddit topics, using
+            the same shape we&apos;ll plug future signals into.
           </p>
         </header>
 
         {/* Helper bar: step + source selector + back link */}
         <div className="flex flex-wrap items-center justify-between gap-3 text-[11px] text-neutral-400">
           <p>
-            Step 1 in the flow: pick a trend → turn it into a brief → generate scripts.
+            Step 1 in the flow: pick a trend → turn it into a brief → generate
+            scripts.
           </p>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -328,18 +337,22 @@ export default function TrendsPage() {
                     </span>
                   </div>
 
-                  <p className="text-xs text-neutral-300">{trend.description}</p>
+                  <p className="text-xs text-neutral-300">
+                    {trend.description}
+                  </p>
 
                   <p className="text-[11px] text-neutral-400">
                     Example hook:{" "}
-                    <span className="text-neutral-200">{trend.exampleHook}</span>
+                    <span className="text-neutral-200">
+                      {trend.exampleHook}
+                    </span>
                   </p>
                 </div>
 
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                   <div className="text-[11px] text-neutral-500">
-                    Step into this trend with Appatize to generate creator-native angles
-                    and scripts.
+                    Step into this trend with Appatize to generate creator-native
+                    angles and scripts.
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">

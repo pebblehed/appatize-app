@@ -1,4 +1,17 @@
 // src/app/api/scripts/generate/route.ts
+
+/**
+ * DEPRECATED — Stage 3 multi-platform script generator
+ *
+ * This route was used by the earlier ScriptsWorkbench + multi-platform
+ * pipeline. The current Stage 4 Scripts experience uses:
+ *
+ *   /api/scripts/intelligence  (see src/app/api/scripts/intelligence/route.ts)
+ *
+ * Keep this file for historical reference and possible future reuse,
+ * but it is **not** called by the current Scripts page.
+ */
+
 import { NextRequest } from "next/server";
 import OpenAI from "openai";
 
@@ -30,28 +43,25 @@ type CulturalInsight = {
 
 export async function POST(req: NextRequest) {
   if (!process.env.OPENAI_API_KEY) {
-    return new Response(
-      JSON.stringify({ error: "Missing OPENAI_API_KEY" }),
-      { status: 500 }
-    );
+    return new Response(JSON.stringify({ error: "Missing OPENAI_API_KEY" }), {
+      status: 500,
+    });
   }
 
   let body: { brief: Brief };
   try {
     body = await req.json();
   } catch {
-    return new Response(
-      JSON.stringify({ error: "Invalid JSON payload" }),
-      { status: 400 }
-    );
+    return new Response(JSON.stringify({ error: "Invalid JSON payload" }), {
+      status: 400,
+    });
   }
 
   const { brief } = body;
   if (!brief) {
-    return new Response(
-      JSON.stringify({ error: "Missing brief" }),
-      { status: 400 }
-    );
+    return new Response(JSON.stringify({ error: "Missing brief" }), {
+      status: 400,
+    });
   }
 
   // Appatize is multi-platform by design
@@ -61,9 +71,7 @@ export async function POST(req: NextRequest) {
     {
       title: brief.title,
       trend:
-        typeof brief.trend === "string"
-          ? brief.trend
-          : brief.trend?.name,
+        typeof brief.trend === "string" ? brief.trend : brief.trend?.name,
       objective: brief.objective,
       audienceHint: brief.audienceHint,
       platformHint: brief.platformHint,
@@ -272,9 +280,7 @@ export async function POST(req: NextRequest) {
           byId.set(item.id, {
             score: item.score,
             rank: item.rank,
-            reason: item.reason
-              ? cleanText(item.reason)
-              : undefined,
+            reason: item.reason ? cleanText(item.reason) : undefined,
           });
         }
 

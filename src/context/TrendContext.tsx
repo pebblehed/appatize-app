@@ -7,7 +7,8 @@ import React, {
   useState,
   ReactNode,
 } from "react";
-import type { Trend } from "./BriefContext";
+import type { Trend } from "@/engine/trends";
+;
 
 interface TrendContextValue {
   selectedTrend: Trend | null;

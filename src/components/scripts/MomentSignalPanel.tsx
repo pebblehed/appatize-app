@@ -1,18 +1,23 @@
+// src/components/scripts/MomentSignalPanel.tsx
 "use client";
 
 import React from "react";
 import clsx from "clsx";
 
+type MomentSignalLike = {
+  coreMoment?: string;
+  culturalTension?: string;
+  stakes?: string;
+  contentRole?: string;
+  // Support both array (from API) and string (any older shape)
+  watchouts?: string | string[];
+  [key: string]: any;
+};
+
 export type MomentSignalProps = {
   isLoading?: boolean;
   error?: string | null;
-  signal?: {
-    coreMoment?: string;
-    culturalTension?: string;
-    stakes?: string;
-    contentRole?: string;
-    watchouts?: string;
-  } | null;
+  signal?: MomentSignalLike | null;
 };
 
 export default function MomentSignalPanel({
@@ -23,9 +28,9 @@ export default function MomentSignalPanel({
   // Loading state
   if (isLoading) {
     return (
-      <div className="rounded-xl border border-purple-800/60 bg-purple-950/20 p-3 mt-3">
+      <div className="mt-3 rounded-xl border border-purple-800/60 bg-purple-950/20 p-3">
         <div className="flex items-center gap-2 text-xs text-purple-100">
-          <span className="h-2 w-2 rounded-full bg-purple-400 animate-pulse" />
+          <span className="h-2 w-2 animate-pulse rounded-full bg-purple-400" />
           <span>Scanning the moment and cultural signals…</span>
         </div>
       </div>
@@ -35,7 +40,7 @@ export default function MomentSignalPanel({
   // Error state
   if (error) {
     return (
-      <div className="rounded-xl border border-red-700/70 bg-red-950/40 p-3 mt-3">
+      <div className="mt-3 rounded-xl border border-red-700/70 bg-red-950/40 p-3">
         <p className="text-xs text-red-100">
           {error || "Something went wrong reading the moment signal."}
         </p>
@@ -46,7 +51,7 @@ export default function MomentSignalPanel({
   // Empty state – nothing from the engine yet
   if (!signal) {
     return (
-      <div className="rounded-xl border border-dashed border-neutral-800 bg-neutral-950/60 p-3 mt-3">
+      <div className="mt-3 rounded-xl border border-dashed border-neutral-800 bg-neutral-950/60 p-3">
         <p className="text-xs text-neutral-400">
           Moment signal will show up here once the engine has enough context
           from your brief and behaviour controls.
@@ -55,20 +60,19 @@ export default function MomentSignalPanel({
     );
   }
 
-  const {
-    coreMoment,
-    culturalTension,
-    stakes,
-    contentRole,
-    watchouts,
-  } = signal;
+  const { coreMoment, culturalTension, stakes, contentRole } = signal;
+
+  const rawWatchouts = signal.watchouts;
+  const normalizedWatchouts = Array.isArray(rawWatchouts)
+    ? rawWatchouts.join("\n• ")
+    : rawWatchouts;
 
   const hasAny =
-    coreMoment || culturalTension || stakes || contentRole || watchouts;
+    coreMoment || culturalTension || stakes || contentRole || normalizedWatchouts;
 
   if (!hasAny) {
     return (
-      <div className="rounded-xl border border-dashed border-neutral-800 bg-neutral-950/60 p-3 mt-3">
+      <div className="mt-3 rounded-xl border border-dashed border-neutral-800 bg-neutral-950/60 p-3">
         <p className="text-xs text-neutral-400">
           No moment signal extracted for this brief yet.
         </p>
@@ -79,7 +83,7 @@ export default function MomentSignalPanel({
   const gridItemClass = "space-y-1";
 
   return (
-    <div className="mt-3 rounded-xl border border-purple-800/60 bg-neutral-950/90 p-3 space-y-3">
+    <div className="mt-3 space-y-3 rounded-xl border border-purple-800/60 bg-neutral-950/90 p-3">
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <div className="space-y-0.5">
@@ -100,7 +104,7 @@ export default function MomentSignalPanel({
             <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
               Core moment
             </p>
-            <p className="leading-relaxed whitespace-pre-wrap">
+            <p className="whitespace-pre-wrap leading-relaxed">
               {coreMoment}
             </p>
           </div>
@@ -111,7 +115,7 @@ export default function MomentSignalPanel({
             <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
               Cultural tension
             </p>
-            <p className="leading-relaxed whitespace-pre-wrap">
+            <p className="whitespace-pre-wrap leading-relaxed">
               {culturalTension}
             </p>
           </div>
@@ -122,7 +126,7 @@ export default function MomentSignalPanel({
             <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
               Why this moment matters
             </p>
-            <p className="leading-relaxed whitespace-pre-wrap">
+            <p className="whitespace-pre-wrap leading-relaxed">
               {stakes}
             </p>
           </div>
@@ -133,19 +137,22 @@ export default function MomentSignalPanel({
             <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
               Role of your content
             </p>
-            <p className="leading-relaxed whitespace-pre-wrap">
+            <p className="whitespace-pre-wrap leading-relaxed">
               {contentRole}
             </p>
           </div>
         )}
 
-        {watchouts && (
+        {normalizedWatchouts && (
           <div className={gridItemClass}>
             <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
               Watch-outs
             </p>
-            <p className="leading-relaxed whitespace-pre-wrap">
-              {watchouts}
+            <p className="whitespace-pre-wrap leading-relaxed">
+              {/* if we joined with bullets, add a leading bullet in UI */}
+              {Array.isArray(rawWatchouts)
+                ? `• ${normalizedWatchouts}`
+                : normalizedWatchouts}
             </p>
           </div>
         )}

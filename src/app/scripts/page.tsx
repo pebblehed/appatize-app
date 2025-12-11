@@ -11,6 +11,8 @@ import { cleanText } from "@/engine/cleanText";
 import AngleTabs from "@/components/scripts/AngleTabs";
 import CulturalSnapshot from "@/components/scripts/CulturalSnapshot";
 import MomentSignalPanel from "@/components/scripts/MomentSignalPanel";
+import BehaviourControlsPanel from "@/components/scripts/BehaviourControlsPanel";
+import type { BehaviourControlsInput } from "@/lib/intelligence/types";
 
 type CulturalInsight = {
   culturalContext?: string;
@@ -25,7 +27,7 @@ type AngleGroup = {
   label: string; // "Angle A: Street POV micro-vlogs"
 };
 
-// This is just the data shape that comes back from the API for the moment signal
+// Moment signal shape used by the UI
 type MomentSignalData = {
   coreMoment?: string;
   culturalTension?: string;
@@ -34,8 +36,16 @@ type MomentSignalData = {
   watchouts?: string;
 } | null;
 
+// Local default behaviour profile
+const DEFAULT_BEHAVIOUR = {
+  energy: "steady" as any,
+  tone: "clean" as any,
+  rhythm: "balanced" as any,
+  platform: "ugc-ad" as any,
+} as BehaviourControlsInput;
+
 export default function ScriptsPage() {
-  const { activeBrief, behaviourControls } = useBriefContext();
+  const { activeBrief } = useBriefContext();
 
   const [variants, setVariants] = useState<ScriptVariant[]>([]);
   const [activeVariantId, setActiveVariantId] = useState<string | null>(null);
@@ -54,6 +64,12 @@ export default function ScriptsPage() {
   const [angleGroups, setAngleGroups] = useState<AngleGroup[]>([]);
   const [activeAngleKey, setActiveAngleKey] = useState<string | null>(null);
 
+  // Local behaviour controls (Stage 4: user shapes → engine responds)
+  const [behaviourControls, setBehaviourControls] =
+    useState<BehaviourControlsInput>(() => DEFAULT_BEHAVIOUR);
+
+  // If there is NO active brief, clear everything. If there *is* a brief,
+  // we keep whatever behaviourControls the user has set (no auto-reset).
   useEffect(() => {
     if (!activeBrief) {
       setVariants([]);
@@ -64,172 +80,184 @@ export default function ScriptsPage() {
       setErrorMsg(null);
       setAngleGroups([]);
       setActiveAngleKey(null);
+      setBehaviourControls(DEFAULT_BEHAVIOUR);
+    }
+  }, [activeBrief]);
+
+  async function handleGenerate() {
+    if (!activeBrief) {
+      setErrorMsg("No active brief selected. Go to Briefs and pick one first.");
       return;
     }
 
-    let cancelled = false;
+    setIsLoading(true);
+    setErrorMsg(null);
+    setCulturalInsight(null);
+    setMomentSignal(null);
+    setAngleGroups([]);
+    setActiveAngleKey(null);
 
-    async function generateVariants() {
-      setIsLoading(true);
-      setErrorMsg(null);
+    try {
+      const res = await fetch("/api/scripts/intelligence", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          brief: activeBrief,
+          behaviour: behaviourControls ?? undefined,
+        }),
+      });
+
+      if (!res.ok) {
+        let apiMessage: string | undefined;
+        try {
+          const errJson = await res.json();
+          apiMessage =
+            typeof errJson?.error === "string" ? errJson.error : undefined;
+        } catch {
+          // ignore JSON parse errors; fall back to generic
+        }
+
+        if (res.status === 429) {
+          throw new Error(
+            apiMessage ??
+              "Rate limit reached. Please wait a few seconds and try again."
+          );
+        }
+
+        throw new Error(
+          apiMessage ?? `Failed to generate variants (status ${res.status}).`
+        );
+      }
+
+      const data = (await res.json()) as {
+        variants: ScriptVariant[];
+        cultural?: CulturalInsight | null;
+        // raw momentSignal can have several field names; we normalise it below
+        momentSignal?: any;
+      };
+
+      const normalized =
+        (data.variants || []).map((v, index) => ({
+          id: v.id ?? `variant-${index + 1}`,
+          label: v.label ?? `Variant ${index + 1}`,
+          body: v.body ?? "",
+          angleName: v.angleName,
+          notes: v.notes,
+          score:
+            typeof v.score === "number" && !Number.isNaN(v.score)
+              ? Math.max(0, Math.min(10, v.score))
+              : undefined,
+        })) ?? [];
+
+      // Determine recommended variant (highest score)
+      let recommended: string | null = null;
+      let bestScore = -1;
+
+      for (const v of normalized) {
+        if (typeof v.score === "number" && v.score > bestScore) {
+          bestScore = v.score;
+          recommended = v.id;
+        }
+      }
+
+      const withRecommended = normalized.map((v) => ({
+        ...v,
+        isRecommended: v.id === recommended,
+      }));
+
+      setVariants(withRecommended);
+
+      // Build angle groups from angleName
+      const uniqueAnglesMap = new Map<string, AngleGroup>();
+
+      withRecommended.forEach((v, idx) => {
+        const rawTitle = v.angleName || `Angle ${idx + 1}`;
+        const key = rawTitle; // use the angle title as grouping key
+
+        if (!uniqueAnglesMap.has(key)) {
+          const letter = String.fromCharCode(
+            "A".charCodeAt(0) + uniqueAnglesMap.size
+          );
+          uniqueAnglesMap.set(key, {
+            key,
+            title: rawTitle,
+            label: `Angle ${letter}: ${rawTitle}`,
+          });
+        }
+      });
+
+      const groups = Array.from(uniqueAnglesMap.values());
+      setAngleGroups(groups);
+
+      // Choose initial active angle:
+      // 1) angle of recommended variant (if any)
+      // 2) otherwise first angle group
+      let initialActiveAngleKey: string | null = null;
+
+      if (recommended) {
+        const rec = withRecommended.find((v) => v.id === recommended);
+        if (rec?.angleName) {
+          initialActiveAngleKey = rec.angleName;
+        }
+      }
+
+      if (!initialActiveAngleKey && groups.length > 0) {
+        initialActiveAngleKey = groups[0].key;
+      }
+
+      setActiveAngleKey(initialActiveAngleKey);
+
+      // Set active / recommended variant IDs
+      if (withRecommended.length > 0) {
+        const initialActiveId = recommended ?? withRecommended[0].id;
+        setActiveVariantId(initialActiveId);
+        setRecommendedVariantId(recommended);
+      } else {
+        setActiveVariantId(null);
+        setRecommendedVariantId(null);
+      }
+
+      setCulturalInsight(data.cultural ?? null);
+
+      // 🔧 Normalise momentSignal from API → UI shape
+      const rawSignal = data.momentSignal ?? null;
+
+      const normalizedSignal: MomentSignalData = rawSignal
+        ? {
+            coreMoment: rawSignal.coreMoment,
+            culturalTension: rawSignal.culturalTension,
+            // API may send whyThisMomentMatters or stakes
+            stakes:
+              rawSignal.stakes ?? rawSignal.whyThisMomentMatters ?? undefined,
+            // API may send roleOfContent or contentRole
+            contentRole:
+              rawSignal.contentRole ?? rawSignal.roleOfContent ?? undefined,
+            // API may send watchouts as array or string
+            watchouts: Array.isArray(rawSignal.watchouts)
+              ? rawSignal.watchouts.join(" • ")
+              : rawSignal.watchouts ?? undefined,
+          }
+        : null;
+
+      setMomentSignal(normalizedSignal);
+    } catch (err) {
+      console.error(err);
+      setVariants([]);
+      setActiveVariantId(null);
+      setRecommendedVariantId(null);
       setCulturalInsight(null);
       setMomentSignal(null);
       setAngleGroups([]);
       setActiveAngleKey(null);
-
-      try {
-        const res = await fetch("/api/scripts/intelligence", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            brief: activeBrief,
-            behaviour: behaviourControls ?? undefined,
-          }),
-        });
-
-        if (!res.ok) {
-          let apiMessage: string | undefined;
-          try {
-            const errJson = await res.json();
-            apiMessage =
-              typeof errJson?.error === "string" ? errJson.error : undefined;
-          } catch {
-            // ignore JSON parse errors here; we'll fall back to generic
-          }
-
-          if (res.status === 429) {
-            throw new Error(
-              apiMessage ??
-                "Rate limit reached. Please wait a few seconds and try again."
-            );
-          }
-
-          throw new Error(
-            apiMessage ??
-              `Failed to generate variants (status ${res.status}).`
-          );
-        }
-
-        const data = (await res.json()) as {
-          variants: ScriptVariant[];
-          cultural?: CulturalInsight | null;
-          momentSignal?: MomentSignalData;
-        };
-
-        if (cancelled) return;
-
-        const normalized =
-          (data.variants || []).map((v, index) => ({
-            id: v.id ?? `variant-${index + 1}`,
-            label: v.label ?? `Variant ${index + 1}`,
-            body: v.body ?? "",
-            angleName: v.angleName,
-            notes: v.notes,
-            score:
-              typeof v.score === "number" && !Number.isNaN(v.score)
-                ? Math.max(0, Math.min(10, v.score))
-                : undefined,
-          })) ?? [];
-
-        // Determine recommended variant (highest score)
-        let recommended: string | null = null;
-        let bestScore = -1;
-
-        for (const v of normalized) {
-          if (typeof v.score === "number" && v.score > bestScore) {
-            bestScore = v.score;
-            recommended = v.id;
-          }
-        }
-
-        const withRecommended = normalized.map((v) => ({
-          ...v,
-          isRecommended: v.id === recommended,
-        }));
-
-        setVariants(withRecommended);
-
-        // Build angle groups from angleName
-        const uniqueAnglesMap = new Map<string, AngleGroup>();
-
-        withRecommended.forEach((v, idx) => {
-          const rawTitle = v.angleName || `Angle ${idx + 1}`;
-          const key = rawTitle; // use the angle title as grouping key
-
-          if (!uniqueAnglesMap.has(key)) {
-            const letter = String.fromCharCode(
-              "A".charCodeAt(0) + uniqueAnglesMap.size
-            );
-            uniqueAnglesMap.set(key, {
-              key,
-              title: rawTitle,
-              label: `Angle ${letter}: ${rawTitle}`,
-            });
-          }
-        });
-
-        const groups = Array.from(uniqueAnglesMap.values());
-        setAngleGroups(groups);
-
-        // Choose initial active angle:
-        // 1) angle of recommended variant (if any)
-        // 2) otherwise first angle group
-        let initialActiveAngleKey: string | null = null;
-
-        if (recommended) {
-          const rec = withRecommended.find((v) => v.id === recommended);
-          if (rec?.angleName) {
-            initialActiveAngleKey = rec.angleName;
-          }
-        }
-
-        if (!initialActiveAngleKey && groups.length > 0) {
-          initialActiveAngleKey = groups[0].key;
-        }
-
-        setActiveAngleKey(initialActiveAngleKey);
-
-        // Set active / recommended variant IDs
-        if (withRecommended.length > 0) {
-          const initialActiveId = recommended ?? withRecommended[0].id;
-          setActiveVariantId(initialActiveId);
-          setRecommendedVariantId(recommended);
-        } else {
-          setActiveVariantId(null);
-          setRecommendedVariantId(null);
-        }
-
-        setCulturalInsight(data.cultural ?? null);
-        setMomentSignal(data.momentSignal ?? null);
-      } catch (err) {
-        console.error(err);
-        if (!cancelled) {
-          setVariants([]);
-          setActiveVariantId(null);
-          setRecommendedVariantId(null);
-          setCulturalInsight(null);
-          setMomentSignal(null);
-          setAngleGroups([]);
-          setActiveAngleKey(null);
-          setErrorMsg(
-            err instanceof Error
-              ? err.message
-              : "Something went wrong while generating script variants. Please try again."
-          );
-        }
-      } finally {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
-      }
+      setErrorMsg(
+        err instanceof Error
+          ? err.message
+          : "Something went wrong while generating script variants. Please try again."
+      );
+    } finally {
+      setIsLoading(false);
     }
-
-    generateVariants();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeBrief, behaviourControls]);
+  }
 
   // Filter variants by active angle
   const visibleVariants =
@@ -249,7 +277,7 @@ export default function ScriptsPage() {
           </h1>
           <p className="text-sm text-neutral-400">
             Start by creating or selecting a brief. Once a brief is active,
-            Appatize will generate all your script variants in one go.
+            Appatize can generate all your script variants in one go.
           </p>
         </div>
 
@@ -277,22 +305,38 @@ export default function ScriptsPage() {
 
   return (
     <div className="space-y-4">
-      {/* Header */}
-      <div className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold tracking-tight text-neutral-50">
-          Script Variants
-        </h1>
-        <p className="text-sm text-neutral-400">
-          All variants are generated in one run from your active brief. Flip
-          through them with the tabs, review the angles and scores, and pick
-          the one that hits the moment.
-        </p>
+      {/* Header + generate */}
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-2xl font-semibold tracking-tight text-neutral-50">
+            Script Variants
+          </h1>
+          <p className="text-sm text-neutral-400">
+            All variants are generated in one run from your active brief. Shape
+            the behaviour, then fire the engine and flip through the angles and
+            scores to pick the one that hits the moment.
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleGenerate}
+            disabled={isLoading}
+            className="inline-flex items-center justify-center rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 shadow-sm transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-70"
+          >
+            {isLoading ? "Generating scripts…" : "Generate scripts"}
+          </button>
+          <span className="hidden text-[11px] text-neutral-500 md:inline-flex">
+            Behaviour → CIE → MSE → Variants
+          </span>
+        </div>
       </div>
 
       {/* Brief meta */}
-      <div className="rounded-xl border border-neutral-800 bg-neutral-950/80 p-3 text-xs text-neutral-400 flex flex-wrap justify-between gap-2">
+      <div className="flex flex-wrap justify-between gap-2 rounded-xl border border-neutral-800 bg-neutral-950/80 p-3 text-xs text-neutral-400">
         <div className="space-y-0.5">
-          <p className="font-medium text-neutral-200 line-clamp-1">
+          <p className="line-clamp-1 font-medium text-neutral-200">
             {titleText}
           </p>
 
@@ -305,7 +349,7 @@ export default function ScriptsPage() {
         </div>
 
         {objectiveText && (
-          <p className="max-w-xs text-right line-clamp-2">
+          <p className="max-w-xs text-right text-xs text-neutral-400 line-clamp-2">
             Objective:{" "}
             <span className="text-neutral-200">{objectiveText}</span>
           </p>
@@ -318,6 +362,13 @@ export default function ScriptsPage() {
           {errorMsg}
         </div>
       )}
+
+      {/* Behaviour controls (Stage 4) */}
+      <BehaviourControlsPanel
+        value={behaviourControls}
+        onChange={setBehaviourControls}
+        isGenerating={isLoading}
+      />
 
       {/* Cultural Snapshot v2 */}
       <CulturalSnapshot snapshot={culturalInsight} />

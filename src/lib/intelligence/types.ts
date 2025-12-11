@@ -8,10 +8,11 @@ export interface ScriptGenerationInput {
   platform: string;
   briefText: string;
 
-  // Soft directional guidance from Behaviour Controls
+  // Behaviour controls from the BehaviourControlsPanel
   behaviour?: BehaviourControlsInput;
 }
 
+// Conceptual energy for angles (kept for angle typing / strategy level)
 export type AngleEnergy = "low-key" | "balanced" | "high-energy";
 
 export type NarrativePattern =
@@ -22,31 +23,57 @@ export type NarrativePattern =
   | "how-to"
   | "hot-take";
 
-// Behaviour Controls as the engine sees them
+// ------------------------------
+// Stage 4 Behaviour Controls Types
+// ------------------------------
+
+// Behaviour energy used by the UI + engine
+// Supports both older labels and the new UI labels.
+export type BehaviourEnergy =
+  | "low-key"
+  | "balanced"
+  | "high-energy"
+  | "low"
+  | "steady"
+  | "high";
+
+// Tone control (Stage 4 UI)
+export type BehaviourTone = "clean" | "warm" | "bold" | "playful";
+
+// Rhythm control (Stage 4 UI + backwards compatibility)
+export type BehaviourRhythm =
+  | "short"
+  | "medium"
+  | "narrative"
+  | "snappy"
+  | "balanced"
+  | "story";
+
+// Platform bias (Stage 4 UI + older platformBias name)
+export type BehaviourPlatform = "tiktok" | "reels" | "shorts" | "ugc-ad";
+
+// Behaviour controls shape as used in route + UI
 export interface BehaviourControlsInput {
-  /**
-   * Global energy of the scripts.
-   * - "low-key": calmer, grounded
-   * - "balanced": natural, default
-   * - "high-energy": punchier, more animated
-   */
-  energy?: AngleEnergy;
+  // Energy preference (low/steady/high etc.)
+  energy?: BehaviourEnergy;
 
-  /**
-   * Rhythm / pacing of the content.
-   * - "short": very tight beats, fast scroll stopper
-   * - "medium": standard social pacing
-   * - "narrative": more story arc, slightly longer beats
-   */
-  rhythm?: "short" | "medium" | "narrative";
+  // Tone (emotional feel of the delivery)
+  tone?: BehaviourTone;
 
-  /**
-   * Platform bias to nudge style without hard-locking.
-   * - "tiktok" | "reels" | "shorts" | "ugc-ad"
-   */
-  platformBias?: "tiktok" | "reels" | "shorts" | "ugc-ad";
+  // Rhythm / pacing of the piece
+  rhythm?: BehaviourRhythm;
+
+  // New UI field name
+  platform?: BehaviourPlatform;
+
+  // Older field name kept for backwards compatibility
+  platformBias?: BehaviourPlatform;
+
+  // Narrative pattern hint (soft guidance)
+  narrativePatternBias?: NarrativePattern | "mixed";
 }
 
+// Engine angle object
 export interface Angle {
   id: string;
   title: string;
@@ -59,6 +86,7 @@ export interface Angle {
   warnings?: string[];
 }
 
+// Structured variants for scripts
 export interface StructuredVariant {
   id: string;
   parentAngleId: string;
@@ -77,7 +105,7 @@ export interface AngleWithVariants extends Angle {
   variants: StructuredVariant[];
 }
 
-// What the engine returns to the API route
+// Cultural Snapshot v2 — flexible, future-proof
 export interface CulturalSnapshotPayload {
   culturalContext?: string;
   momentInsight?: string;
@@ -88,31 +116,36 @@ export interface CulturalSnapshotPayload {
   audienceMood?: string;
   platformStylePulse?: string;
   creativeLevers?: string;
+
+  // Allow unknown future fields without breaking the app
+  [key: string]: any;
 }
 
 /**
- * Moment-Signal Extraction (MSE) payload — “how to play this moment”.
- * This feeds the MomentSignalPanel on the Scripts page.
+ * Moment-Signal Extraction (MSE) — strategy layer
+ * Matches the UI fields in MomentSignalPanel.
  */
 export interface MomentSignal {
-  coreMoment?: string;
-  culturalTension?: string;
-  stakes?: string;
-  contentRole?: string;
-  watchouts?: string;
+  coreMoment?: string;        // What is the moment actually about?
+  culturalTension?: string;   // What’s the friction / tension in culture?
+  stakes?: string;            // Why this moment matters — what’s at stake?
+  contentRole?: string;       // What role *this* content should play
+
+  // Can be a single string or an array (as normalised in the route)
+  watchouts?: string | string[];
+
+  freshness?: "evergreen" | "timely" | "flash-trend";
+
+  [key: string]: any; // Extendable by engine
 }
 
+// What the engine returns to the API route
 export interface ScriptGenerationResult {
   angles: AngleWithVariants[];
 
-  /**
-   * Optional top-level snapshot of the cultural intelligence
-   * for this brief + behaviour configuration.
-   */
+  // New: cultural snapshot v2 — optional
   snapshot?: CulturalSnapshotPayload;
 
-  /**
-   * Optional strategic read on the moment, used by MomentSignalPanel.
-   */
+  // New: Moment-Signal Extraction (MSE)
   momentSignal?: MomentSignal;
 }

@@ -11,7 +11,8 @@ export default function HomePage() {
         </h1>
         <p className="text-sm text-neutral-400">
           See what&apos;s moving in culture, then turn it into creator-style
-          content in seconds.
+          content in seconds. This view is a curated snapshot; head into{" "}
+          <span className="font-medium text-neutral-200">Trends</span> for live feeds.
         </p>
       </header>
 
@@ -22,7 +23,7 @@ export default function HomePage() {
           {/* Badge */}
           <div className="absolute right-4 top-4">
             <span className="inline-flex items-center rounded-pill border border-brand-pink/40 bg-brand-pink/10 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-brand-pink">
-              APPATIZE MVP • Mock Data
+              Cultural snapshot • MVP
             </span>
           </div>
 
@@ -32,8 +33,9 @@ export default function HomePage() {
                 Live Trend Snapshot
               </h2>
               <p className="max-w-xl text-xs text-neutral-400">
-                In the MVP, we&apos;ll start with a curated list of active
-                trends. Later, this view becomes a fully live cultural radar.
+                In the MVP, this view shows a curated snapshot of active trends
+                for look and feel. For live trend feeds and new topics, browse{" "}
+                <span className="font-medium text-neutral-200">Trends</span>.
               </p>
             </div>
 
@@ -116,8 +118,9 @@ export default function HomePage() {
               Start your MVP flow
             </h2>
             <p className="text-xs text-neutral-400">
-              For the MVP, our goal is simple: pick a trend → generate a brief
-              → generate a script.
+              Pick a trend → generate a brief → generate a script. For live
+              trends, start in{" "}
+              <span className="font-medium text-neutral-200">Trends</span>.
             </p>
           </div>
 

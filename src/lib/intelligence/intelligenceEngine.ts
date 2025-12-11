@@ -4,8 +4,6 @@ import OpenAI from "openai";
 import {
   ScriptGenerationInput,
   ScriptGenerationResult,
-  BehaviourControlsInput,
-  AngleEnergy,
 } from "./types";
 
 const openai = new OpenAI({
@@ -13,77 +11,65 @@ const openai = new OpenAI({
 });
 
 const SYSTEM_PROMPT = `
-You are the Cultural Intelligence Engine (CIE) inside Appatize, a Cultural Operations Platform.
+You are the Cultural Intelligence Engine (CIE) + Moment-Signal Extraction (MSE) layer inside Appatize, a Cultural Operations Platform.
 
-Your job for each brief:
-- Understand the trend, objective, audience, platform, and optional behaviour controls.
-- Generate 3–5 DISTINCT angles for short-form vertical content.
-- For each angle, generate 4–6 structured variants (scripts).
-- Also produce:
-  - A compact cultural snapshot object.
-  - A compact moment-signal object (MSE).
+Your responsibilities:
+- Read a trend + brief + soft behaviour controls.
+- Generate 3–5 DISTINCT cultural angles.
+- For each angle, generate 4–6 structured script variants.
+- Extract a Cultural Snapshot (v2) for this brief.
+- Extract a Moment Signal (MSE) describing how to play this moment.
 
-Output:
-- STRICTLY VALID JSON that matches the TypeScript types provided.
-- No intros, no explanations, no markdown. JSON ONLY.
+Return STRICTLY VALID JSON that matches the provided TypeScript types.
+No intros, no explanations, no markdown. JSON ONLY.
+
+Tone & quality rules:
+- Scripts must feel naturally human, not robotic.
+- They must be specific to the stated platform and audience.
+- Avoid generic content; show cultural awareness and specificity.
+- Assume short-form vertical (TikTok / Reels / Shorts) unless told otherwise.
+- Angles should differ in POV, energy, and narrative pattern.
+- Variants must all be on-brief AND clearly descendants of their parent angle.
 `;
 
-function describeBehaviourForModel(behaviour?: BehaviourControlsInput): string {
-  if (!behaviour) return "No explicit behaviour controls provided; use a natural, on-brief style.";
+// Helper to describe behaviour controls to the model
+function describeBehaviourInPrompt(input: ScriptGenerationInput): string {
+  const { behaviour } = input;
+  if (!behaviour) return "Behaviour controls: default (balanced, standard pacing, no explicit platform bias).";
 
   const parts: string[] = [];
 
   if (behaviour.energy) {
-    const e: AngleEnergy = behaviour.energy;
-    if (e === "low-key") {
-      parts.push("Energy: low-key, calm, grounded.");
-    } else if (e === "high-energy") {
-      parts.push("Energy: high-energy, punchy, animated.");
-    } else {
-      parts.push("Energy: balanced, natural social tone.");
-    }
+    parts.push(`Energy: ${behaviour.energy} (low-key / balanced / high-energy).`);
   }
-
   if (behaviour.rhythm) {
-    if (behaviour.rhythm === "short") {
-      parts.push("Rhythm: very short, punchy beats for fast scroll-stopping hooks.");
-    } else if (behaviour.rhythm === "medium") {
-      parts.push("Rhythm: standard social pacing.");
-    } else if (behaviour.rhythm === "narrative") {
-      parts.push("Rhythm: more narrative arc, slightly longer beats.");
-    }
+    parts.push(`Rhythm: ${behaviour.rhythm} (short / medium / narrative pacing).`);
   }
-
   if (behaviour.platformBias) {
-    if (behaviour.platformBias === "tiktok") {
-      parts.push("Platform bias: nudge style toward TikTok culture and pacing.");
-    } else if (behaviour.platformBias === "reels") {
-      parts.push("Platform bias: nudge style toward Instagram Reels.");
-    } else if (behaviour.platformBias === "shorts") {
-      parts.push("Platform bias: nudge style toward YouTube Shorts.");
-    } else if (behaviour.platformBias === "ugc-ad") {
-      parts.push("Platform bias: nudge style toward native-feeling UGC ads.");
-    }
+    parts.push(`Platform bias: ${behaviour.platformBias} (nudge style toward this environment).`);
+  }
+  if (behaviour.narrativePatternBias) {
+    parts.push(`Narrative pattern bias: ${behaviour.narrativePatternBias} (or "mixed").`);
   }
 
   if (parts.length === 0) {
-    return "Behaviour controls provided but very light; default to a natural, platform-native style.";
+    return "Behaviour controls: default (balanced, standard pacing, no explicit platform bias).";
   }
 
-  return parts.join(" ");
+  return `Behaviour controls:\n${parts.join("\n")}`;
 }
 
 export async function generateAnglesAndVariantsFromBrief(
   input: ScriptGenerationInput
 ): Promise<ScriptGenerationResult> {
-  const { trendLabel, objective, audience, platform, briefText, behaviour } = input;
+  const { trendLabel, objective, audience, platform, briefText } = input;
 
   if (!process.env.OPENAI_API_KEY) {
     console.error("[intelligenceEngine] Missing OPENAI_API_KEY");
     throw new Error("OPENAI_API_KEY is not set on the server");
   }
 
-  const behaviourSummary = describeBehaviourForModel(behaviour);
+  const behaviourDescription = describeBehaviourInPrompt(input);
 
   const userPrompt = `
 TREND:
@@ -98,16 +84,12 @@ ${audience}
 PLATFORM:
 ${platform}
 
-BEHAVIOUR CONTROLS (soft guidance only):
-${behaviourSummary}
-
 BRIEF:
 ${briefText}
 
-You are generating *short-form vertical* content scripts by default (TikTok / Reels / Shorts / UGC),
-unless the brief clearly demands otherwise.
+${behaviourDescription}
 
-Return JSON of this exact shape (TypeScript-like), no extra keys:
+You must return JSON shaped exactly like this TypeScript model:
 
 type AngleEnergy = "low-key" | "balanced" | "high-energy";
 type NarrativePattern =
@@ -150,19 +132,21 @@ interface CulturalSnapshotPayload {
   momentInsight?: string;
   flowGuidance?: string;
   creativePrinciple?: string;
-
   culturalDynamics?: string;
   audienceMood?: string;
   platformStylePulse?: string;
   creativeLevers?: string;
+  [key: string]: any;
 }
 
 interface MomentSignal {
-  coreMoment: string;
-  culturalTension: string;
-  stakes: string;
-  contentRole: string;
+  coreMoment?: string;
+  culturalTension?: string;
+  stakes?: string;
+  contentRole?: string;
   watchouts?: string;
+  freshness?: "evergreen" | "timely" | "flash-trend";
+  [key: string]: any;
 }
 
 interface ScriptGenerationResult {
@@ -171,37 +155,43 @@ interface ScriptGenerationResult {
   momentSignal?: MomentSignal;
 }
 
-Rules:
+Rules for ANGLES:
 - Generate 3–5 angles.
+- Angles must differ clearly in POV, energy, and narrative pattern.
+- Each angle should feel like a distinct way to show up in culture.
+- culturalTrigger: focus on the cultural hook or tension being tapped.
+- audienceHook: how this specifically lands with the target audience.
+
+Rules for VARIANTS:
 - For each angle, generate 4–6 variants.
-- IDs should be short stable strings (e.g. "angle-1", "angle-1-variant-1").
-- confidence MUST be between 0.5 and 1.0.
-- hook must be a thumb-stopping opening line (short).
-- body is the core idea / flow, concise, not a full essay.
-- cta is optional; when present, tie it to the OBJECTIVE, not generic "follow for more".
-- outro is optional; when present, make it a natural closing for the PLATFORM.
-- Script language must be natural, human, and platform-aware.
+- IDs should be concise but stable (e.g. "angle-1-variant-1").
+- confidence should be between 0.5 and 1.0.
+- hook: a thumb-stopping opening line (short).
+- body: the core idea / flow, concise but complete enough to shoot.
+- cta: optional; when present, tie it to the OBJECTIVE (not generic "follow for more").
+- outro: optional; when present, use a natural closing line for the platform.
+- Scripts should be platform-aware (cuts, beats, pacing) but text-only.
 
-For snapshot:
-- culturalContext: 1–2 sentences on what’s happening culturally around this trend.
-- momentInsight: what moment in the audience’s day / life this really plugs into.
-- flowGuidance: how the content should flow (reference energy + rhythm).
-- creativePrinciple: the core POV or principle to stay anchored to.
-- culturalDynamics: the underlying cultural or social dynamics at play.
-- audienceMood: how the audience probably feels in that moment.
-- platformStylePulse: how the platform’s current style/format norms affect this content.
-- creativeLevers: the 2–4 strongest levers to pull creatively.
+Rules for Cultural Snapshot (snapshot):
+- culturalContext: one tight paragraph on the broader cultural context.
+- momentInsight: one tight paragraph on why this moment matters *now* for this audience.
+- flowGuidance: guidance on narrative pattern + energy, reflecting behaviour controls where relevant.
+- creativePrinciple: a simple core principle to keep in mind ("stay anchored to...").
+- Additional fields (culturalDynamics, audienceMood, platformStylePulse, creativeLevers) are optional amplifiers. Use them only when they genuinely add clarity.
 
-For momentSignal:
-- coreMoment: the precise moment you want to intercept.
-- culturalTension: the friction / tension around that moment.
-- stakes: what’s at stake for the audience if they act / don’t act.
-- contentRole: the role this content should play (e.g. “myth-buster”, “coach”, “permission slip”).
-- watchouts: any cultural / platform sensitivities.
+Rules for Moment Signal (momentSignal / MSE):
+- coreMoment: what this moment is actually about underneath the surface.
+- culturalTension: the key friction, tension, or contradiction in culture here.
+- stakes: why this matters (to the audience, brands, and culture).
+- contentRole: what role this specific piece of content should play in the moment.
+- watchouts: concise list-style text on pitfalls (tone, ethics, trivialising serious topics, etc.).
+- freshness: choose "evergreen", "timely", or "flash-trend" and justify implicitly in the text.
 
-DO NOT wrap the JSON in markdown.
-DO NOT add commentary or explanation.
-JSON ONLY.
+Critical constraints:
+- Scripts, snapshot, and momentSignal must all be consistent with each other.
+- They must reflect the trend, objective, audience, platform, and behaviour controls.
+- DO NOT wrap the JSON in markdown.
+- DO NOT add commentary before or after the JSON.
 `;
 
   const completion = await openai.chat.completions.create({
@@ -231,7 +221,7 @@ JSON ONLY.
 
   if (!parsed.angles || !Array.isArray(parsed.angles)) {
     console.error("[intelligenceEngine] Parsed JSON missing angles[]", parsed);
-    throw new Error("Invalid script generation response shape");
+    throw new Error("Invalid script generation response shape (no angles)");
   }
 
   return parsed;

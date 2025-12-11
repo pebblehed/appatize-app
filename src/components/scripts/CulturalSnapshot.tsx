@@ -2,54 +2,64 @@
 "use client";
 
 import React from "react";
-
-export type CulturalSnapshotData = {
-  // V1 fields (already in use)
-  culturalContext?: string;
-  momentInsight?: string;
-  flowGuidance?: string;
-  creativePrinciple?: string;
-
-  // V2 fields (new intelligence surface)
-  culturalDynamics?: string;
-  audienceMood?: string;
-  platformStylePulse?: string;
-  creativeLevers?: string;
-};
+import type { CulturalSnapshotPayload } from "@/lib/intelligence/types";
 
 type CulturalSnapshotProps = {
-  snapshot: CulturalSnapshotData | null;
+  snapshot: CulturalSnapshotPayload | null;
 };
 
 export default function CulturalSnapshot({ snapshot }: CulturalSnapshotProps) {
   if (!snapshot) return null;
 
   const {
+    // v1-style fields
     culturalContext,
     momentInsight,
     flowGuidance,
     creativePrinciple,
+
+    // v2-style fields from the engine / route
     culturalDynamics,
     audienceMood,
     platformStylePulse,
     creativeLevers,
-  } = snapshot;
+
+    // extra v2 fields we want to surface in a backwards-compatible way
+    contextInCulture,
+    audienceMoodSensitivity,
+    audienceMomentInsight,
+  } = snapshot as CulturalSnapshotPayload & {
+    contextInCulture?: string;
+    audienceMoodSensitivity?: string;
+    audienceMomentInsight?: string;
+  };
+
+  // Backwards-compatible resolution: prefer v1 keys if present,
+  // otherwise fall back to the newer v2 names.
+  const resolvedContext =
+    culturalContext || contextInCulture || undefined;
+
+  const resolvedAudienceMood =
+    audienceMood || audienceMoodSensitivity || undefined;
+
+  const resolvedMomentInsight =
+    momentInsight || audienceMomentInsight || undefined;
 
   // If somehow everything is empty, don’t render noise
   const hasAny =
-    culturalContext ||
-    momentInsight ||
+    resolvedContext ||
+    resolvedMomentInsight ||
     flowGuidance ||
     creativePrinciple ||
     culturalDynamics ||
-    audienceMood ||
+    resolvedAudienceMood ||
     platformStylePulse ||
     creativeLevers;
 
   if (!hasAny) return null;
 
   return (
-    <section className="rounded-xl border border-purple-700/60 bg-purple-950/15 p-3.5 space-y-3">
+    <section className="space-y-3 rounded-xl border border-purple-700/60 bg-purple-950/15 p-3.5">
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <div className="space-y-0.5">
@@ -75,30 +85,27 @@ export default function CulturalSnapshot({ snapshot }: CulturalSnapshotProps) {
         {/* Column 1 */}
         <div className="space-y-2">
           {culturalDynamics && (
-            <Block
-              label="Cultural dynamics"
-              body={culturalDynamics}
-            />
+            <Block label="Cultural dynamics" body={culturalDynamics} />
           )}
 
-          {culturalContext && (
+          {resolvedContext && (
             <Block
               label="Context in the culture"
-              body={culturalContext}
+              body={resolvedContext}
             />
           )}
 
-          {audienceMood && (
+          {resolvedAudienceMood && (
             <Block
               label="Audience mood & sensitivity"
-              body={audienceMood}
+              body={resolvedAudienceMood}
             />
           )}
 
-          {momentInsight && (
+          {resolvedMomentInsight && (
             <Block
               label="Audience / moment insight"
-              body={momentInsight}
+              body={resolvedMomentInsight}
             />
           )}
         </div>
@@ -150,14 +157,14 @@ function Block({ label, body, highlight = false }: BlockProps) {
     <div
       className={
         highlight
-          ? "rounded-lg border border-purple-500/40 bg-purple-500/5 p-2.5 space-y-1.5"
-          : "rounded-lg border border-neutral-800 bg-neutral-900/40 p-2.5 space-y-1.5"
+          ? "space-y-1.5 rounded-lg border border-purple-500/40 bg-purple-500/5 p-2.5"
+          : "space-y-1.5 rounded-lg border border-neutral-800 bg-neutral-900/40 p-2.5"
       }
     >
       <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-300">
         {label}
       </p>
-      <p className="text-xs leading-relaxed text-neutral-100 whitespace-pre-wrap">
+      <p className="whitespace-pre-wrap text-xs leading-relaxed text-neutral-100">
         {body}
       </p>
     </div>
