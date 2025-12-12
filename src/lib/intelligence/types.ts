@@ -1,18 +1,11 @@
 // src/lib/intelligence/types.ts
+// Shared contract types for Appatize intelligence.
+// Keep this in /src (public boundary) so UI + routes + internal engine stay aligned.
 
-// High-level input into the intelligence engine
-export interface ScriptGenerationInput {
-  trendLabel: string;
-  objective: string;
-  audience: string;
-  platform: string;
-  briefText: string;
-
-  // Behaviour controls from the BehaviourControlsPanel
-  behaviour?: BehaviourControlsInput;
-}
-
-// Conceptual energy for angles (kept for angle typing / strategy level)
+/**
+ * Conceptual energy for angles (strategy layer).
+ * This is what the engine should emit in Angle.energy.
+ */
 export type AngleEnergy = "low-key" | "balanced" | "high-energy";
 
 export type NarrativePattern =
@@ -23,12 +16,11 @@ export type NarrativePattern =
   | "how-to"
   | "hot-take";
 
-// ------------------------------
-// Stage 4 Behaviour Controls Types
-// ------------------------------
-
-// Behaviour energy used by the UI + engine
-// Supports both older labels and the new UI labels.
+/**
+ * Behaviour controls (user intent) — inputs used to shape generation.
+ * We accept multiple historical labels for backwards compatibility,
+ * but the engine should normalise them before use.
+ */
 export type BehaviourEnergy =
   | "low-key"
   | "balanced"
@@ -37,10 +29,8 @@ export type BehaviourEnergy =
   | "steady"
   | "high";
 
-// Tone control (Stage 4 UI)
 export type BehaviourTone = "clean" | "warm" | "bold" | "playful";
 
-// Rhythm control (Stage 4 UI + backwards compatibility)
 export type BehaviourRhythm =
   | "short"
   | "medium"
@@ -49,28 +39,35 @@ export type BehaviourRhythm =
   | "balanced"
   | "story";
 
-// Platform bias (Stage 4 UI + older platformBias name)
 export type BehaviourPlatform = "tiktok" | "reels" | "shorts" | "ugc-ad";
 
-// Behaviour controls shape as used in route + UI
+/**
+ * Behaviour controls shape as used in route + UI.
+ * Note: `platformBias` is legacy but still accepted.
+ */
 export interface BehaviourControlsInput {
-  // Energy preference (low/steady/high etc.)
   energy?: BehaviourEnergy;
-
-  // Tone (emotional feel of the delivery)
   tone?: BehaviourTone;
-
-  // Rhythm / pacing of the piece
   rhythm?: BehaviourRhythm;
 
-  // New UI field name
+  // Current UI field name
   platform?: BehaviourPlatform;
 
-  // Older field name kept for backwards compatibility
+  // Legacy field name (kept for compatibility)
   platformBias?: BehaviourPlatform;
 
-  // Narrative pattern hint (soft guidance)
   narrativePatternBias?: NarrativePattern | "mixed";
+}
+
+// High-level input into the intelligence engine
+export interface ScriptGenerationInput {
+  trendLabel: string;
+  objective: string;
+  audience: string;
+  platform: string;
+  briefText: string;
+
+  behaviour?: BehaviourControlsInput;
 }
 
 // Engine angle object
@@ -91,7 +88,6 @@ export interface StructuredVariant {
   id: string;
   parentAngleId: string;
 
-  // Structured script fields
   hook: string;
   body: string;
   cta?: string;
@@ -118,7 +114,7 @@ export interface CulturalSnapshotPayload {
   creativeLevers?: string;
 
   // Allow unknown future fields without breaking the app
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 /**
@@ -126,26 +122,22 @@ export interface CulturalSnapshotPayload {
  * Matches the UI fields in MomentSignalPanel.
  */
 export interface MomentSignal {
-  coreMoment?: string;        // What is the moment actually about?
-  culturalTension?: string;   // What’s the friction / tension in culture?
-  stakes?: string;            // Why this moment matters — what’s at stake?
-  contentRole?: string;       // What role *this* content should play
+  coreMoment?: string;
+  culturalTension?: string;
+  stakes?: string;
+  contentRole?: string;
 
-  // Can be a single string or an array (as normalised in the route)
+  // Normalisation can convert this to string[]
   watchouts?: string | string[];
 
   freshness?: "evergreen" | "timely" | "flash-trend";
 
-  [key: string]: any; // Extendable by engine
+  [key: string]: unknown;
 }
 
 // What the engine returns to the API route
 export interface ScriptGenerationResult {
   angles: AngleWithVariants[];
-
-  // New: cultural snapshot v2 — optional
   snapshot?: CulturalSnapshotPayload;
-
-  // New: Moment-Signal Extraction (MSE)
   momentSignal?: MomentSignal;
 }
