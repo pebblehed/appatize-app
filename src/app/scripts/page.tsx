@@ -3,9 +3,7 @@
 
 import React, { useEffect, useState } from "react";
 import { useBriefContext } from "@/context/BriefContext";
-import VariantTabs, {
-  ScriptVariant,
-} from "@/components/variant/VariantsTabs";
+import VariantTabs, { ScriptVariant } from "@/components/variant/VariantsTabs";
 import ScriptOutput from "./ScriptOutput";
 import { cleanText } from "@/engine/cleanText";
 import AngleTabs from "@/components/scripts/AngleTabs";
@@ -49,12 +47,12 @@ export default function ScriptsPage() {
 
   const [variants, setVariants] = useState<ScriptVariant[]>([]);
   const [activeVariantId, setActiveVariantId] = useState<string | null>(null);
-  const [recommendedVariantId, setRecommendedVariantId] = useState<
-    string | null
-  >(null);
-  const [culturalInsight, setCulturalInsight] = useState<
-    CulturalInsight | null
-  >(null);
+  const [recommendedVariantId, setRecommendedVariantId] = useState<string | null>(
+    null
+  );
+  const [culturalInsight, setCulturalInsight] = useState<CulturalInsight | null>(
+    null
+  );
   const [momentSignal, setMomentSignal] = useState<MomentSignalData>(null);
 
   const [isLoading, setIsLoading] = useState(false);
@@ -136,18 +134,25 @@ export default function ScriptsPage() {
         momentSignal?: any;
       };
 
+      // ✅ FIX 1: Ensure angleName is ALWAYS a non-empty string so:
+      // - angle grouping is stable
+      // - angle filtering works
+      // - active variant selection doesn't fall out of visibleVariants
       const normalized =
-        (data.variants || []).map((v, index) => ({
-          id: v.id ?? `variant-${index + 1}`,
-          label: v.label ?? `Variant ${index + 1}`,
-          body: v.body ?? "",
-          angleName: v.angleName,
-          notes: v.notes,
-          score:
-            typeof v.score === "number" && !Number.isNaN(v.score)
-              ? Math.max(0, Math.min(10, v.score))
-              : undefined,
-        })) ?? [];
+        (data.variants || []).map((v, index) => {
+          const fallbackAngleName = v.angleName ?? `Angle ${index + 1}`;
+          return {
+            id: v.id ?? `variant-${index + 1}`,
+            label: v.label ?? `Variant ${index + 1}`,
+            body: v.body ?? "",
+            angleName: fallbackAngleName,
+            notes: v.notes,
+            score:
+              typeof v.score === "number" && !Number.isNaN(v.score)
+                ? Math.max(0, Math.min(10, v.score))
+                : undefined,
+          };
+        }) ?? [];
 
       // Determine recommended variant (highest score)
       let recommended: string | null = null;
@@ -170,9 +175,9 @@ export default function ScriptsPage() {
       // Build angle groups from angleName
       const uniqueAnglesMap = new Map<string, AngleGroup>();
 
-      withRecommended.forEach((v, idx) => {
-        const rawTitle = v.angleName || `Angle ${idx + 1}`;
-        const key = rawTitle; // use the angle title as grouping key
+      withRecommended.forEach((v) => {
+        const rawTitle = v.angleName || "Angle";
+        const key = rawTitle;
 
         if (!uniqueAnglesMap.has(key)) {
           const letter = String.fromCharCode(
@@ -207,9 +212,19 @@ export default function ScriptsPage() {
 
       setActiveAngleKey(initialActiveAngleKey);
 
-      // Set active / recommended variant IDs
+      // ✅ FIX 2: Set the initial active variant from the active angle group
       if (withRecommended.length > 0) {
-        const initialActiveId = recommended ?? withRecommended[0].id;
+        const variantsInInitialAngle =
+          initialActiveAngleKey
+            ? withRecommended.filter((v) => v.angleName === initialActiveAngleKey)
+            : withRecommended;
+
+        const initialActiveId =
+          (recommended &&
+            variantsInInitialAngle.some((v) => v.id === recommended)
+            ? recommended
+            : variantsInInitialAngle[0]?.id) ?? withRecommended[0].id;
+
         setActiveVariantId(initialActiveId);
         setRecommendedVariantId(recommended);
       } else {
@@ -387,9 +402,7 @@ export default function ScriptsPage() {
           onChange={(id) => {
             setActiveAngleKey(id);
             // When switching angle, reset active variant to the first in that angle group (if any)
-            const firstInAngle = variants.find(
-              (v) => (v.angleName || "") === id
-            );
+            const firstInAngle = variants.find((v) => (v.angleName || "") === id);
             if (firstInAngle) {
               setActiveVariantId(firstInAngle.id);
             }
