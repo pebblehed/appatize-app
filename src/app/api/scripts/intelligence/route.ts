@@ -1,4 +1,12 @@
 // src/app/api/scripts/intelligence/route.ts
+//
+// Stage D — Intelligence Hardening & Signal Stability
+//
+// Rules enforced here:
+// - Never return 500 (no platform can break the app)
+// - Gate intelligence on /api/signals availability
+// - Never silently return empty scripts
+// - Response shape stays compatible with current UI
 
 import { NextResponse } from "next/server";
 import { generateAnglesAndVariantsFromBrief } from "@/lib/intelligence/intelligenceEngine";
@@ -8,13 +16,44 @@ import type {
   BehaviourControlsInput,
 } from "@/lib/intelligence/types";
 
+export const dynamic = "force-dynamic";
+
 /**
- * NOTE (Stage D):
- * This route is a delegator.
- * - It does NOT talk to OpenAI directly.
- * - It calls the internal CIE/MSE engine via the public wrapper.
- * This keeps one canonical brain and prevents fragile parsing failures.
+ * Stage D: typed failure codes for UI-safe, loud failures.
  */
+type IntelligenceErrorCode =
+  | "BAD_REQUEST"
+  | "SIGNALS_UNAVAILABLE"
+  | "SIGNALS_EMPTY"
+  | "ENGINE_EMPTY_SCRIPTS"
+  | "ENGINE_ERROR";
+
+type IntelligenceFail = {
+  ok: false;
+  error: {
+    code: IntelligenceErrorCode;
+    message: string;
+    meta?: Record<string, unknown>;
+  };
+};
+
+type IntelligenceOk = {
+  ok: true;
+  cultural: any;
+  momentSignal: any;
+  variants: any[];
+  result: ScriptGenerationResult;
+};
+
+async function safeFetchJson(url: string) {
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Convert whatever the UI sends as `brief` into the canonical ScriptGenerationInput.
@@ -165,6 +204,19 @@ function flattenVariants(result: ScriptGenerationResult) {
   return variants;
 }
 
+function fail(
+  code: IntelligenceErrorCode,
+  message: string,
+  meta?: Record<string, unknown>
+) {
+  const payload: IntelligenceFail = {
+    ok: false,
+    error: { code, message, meta },
+  };
+  // Stage D: never 500. We fail loudly via typed payload.
+  return NextResponse.json(payload, { status: 200 });
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
@@ -173,42 +225,84 @@ export async function POST(req: Request) {
       body?.behaviour ?? undefined;
 
     if (!brief) {
-      return NextResponse.json(
-        { error: "Missing 'brief' in request body." },
-        { status: 400 }
+      return fail("BAD_REQUEST", "Missing 'brief' in request body.");
+    }
+
+    // Stage D gate: intelligence only runs if signals are available + non-empty.
+    // IMPORTANT: Use absolute URL only in local dev. For deployment we’ll switch to relative.
+    const signals = await safeFetchJson("http://localhost:3000/api/signals");
+
+    const available = Boolean(signals?.available);
+    const items = Array.isArray(signals?.items) ? signals.items : [];
+    const sources = Array.isArray(signals?.sources) ? signals.sources : [];
+
+    if (!signals || !available) {
+      return fail(
+        "SIGNALS_UNAVAILABLE",
+        "Signals unavailable: no healthy upstream sources.",
+        { sources }
       );
     }
 
+    if (items.length === 0) {
+      return fail(
+        "SIGNALS_EMPTY",
+        "Signals available but empty: no usable signal items returned.",
+        { sources }
+      );
+    }
+
+    // Build input from brief (UI data). Signals are currently used for upstream stability gating.
+    // We will pass normalized signals into the engine in the next step (without refactoring the UI).
     const input = buildInputFromBrief(brief, behaviour);
-    const engineResult = await generateAnglesAndVariantsFromBrief(input);
+
+    let engineResult: ScriptGenerationResult;
+    try {
+      engineResult = await generateAnglesAndVariantsFromBrief(input);
+    } catch (e: any) {
+      console.error("[/api/scripts/intelligence] Engine error:", e);
+      return fail(
+        "ENGINE_ERROR",
+        e?.message ??
+          "Engine failed while generating scripts. Please try again.",
+        { sources }
+      );
+    }
 
     // Pro guard: never silently ship empty scripts.
-    assertNoEmptyScripts(engineResult);
+    try {
+      assertNoEmptyScripts(engineResult);
+    } catch (e: any) {
+      console.warn("[/api/scripts/intelligence] Empty script guard hit:", e);
+      return fail(
+        "ENGINE_EMPTY_SCRIPTS",
+        e?.message ?? "Engine returned empty script content.",
+        { sources }
+      );
+    }
 
     // Flatten for current UI, while keeping canonical result available.
     const variants = flattenVariants(engineResult);
 
-    return NextResponse.json(
-      {
-        // Compatibility (current UI)
-        cultural: engineResult.snapshot ?? null,
-        momentSignal: engineResult.momentSignal ?? null,
-        variants,
+    const okPayload: IntelligenceOk = {
+      ok: true,
 
-        // Canonical Stage D output (for new UI surfaces / future work)
-        result: engineResult,
-      },
-      { status: 200 }
-    );
+      // Compatibility (current UI)
+      cultural: engineResult.snapshot ?? null,
+      momentSignal: engineResult.momentSignal ?? null,
+      variants,
+
+      // Canonical Stage D output (for new UI surfaces / future work)
+      result: engineResult,
+    };
+
+    return NextResponse.json(okPayload, { status: 200 });
   } catch (err: any) {
     console.error("[/api/scripts/intelligence] Unhandled error", err);
-    return NextResponse.json(
-      {
-        error:
-          err?.message ??
-          "Unexpected error while generating script variants. Please try again.",
-      },
-      { status: 500 }
+    return fail(
+      "ENGINE_ERROR",
+      err?.message ??
+        "Unexpected error while generating script variants. Please try again."
     );
   }
 }

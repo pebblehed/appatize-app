@@ -29,7 +29,8 @@ type UiTrend = {
 /**
  * API response shapes – works with:
  * - /api/trends/mock
- * - /api/signals/reddit?subreddits=...
+ * - /api/trends/hn
+ * - /api/signals/reddit?subs=...
  */
 type ApiTrend = {
   id: string;
@@ -44,9 +45,13 @@ type ApiTrend = {
 type TrendsApiResponse = {
   source?: string;
   trends: ApiTrend[];
+  status?: string;
+  count?: number; // ✅ Added: HN adapter returns count
+  message?: string;
 };
 
 type TrendSourceId =
+  | "hn-live"
   | "mock-stage-1"
   | "reddit-entrepreneur"
   | "reddit-socialmedia-marketing";
@@ -57,19 +62,25 @@ const SOURCE_OPTIONS: {
   apiPath: string;
 }[] = [
   {
+    id: "hn-live",
+    label: "Hacker News (LIVE, primary)",
+    apiPath: "/api/trends/hn?limit=20",
+  },
+  {
     id: "mock-stage-1",
     label: "Internal test engine (Stage 1 mock)",
     apiPath: "/api/trends/mock",
   },
   {
     id: "reddit-entrepreneur",
-    label: "Reddit: r/Entrepreneur only",
-    apiPath: "/api/signals/reddit?subreddits=Entrepreneur",
+    label: "Reddit (fallback): r/Entrepreneur only",
+    // IMPORTANT: reddit route reads `subs=`, not `subreddits=`
+    apiPath: "/api/signals/reddit?subs=Entrepreneur",
   },
   {
     id: "reddit-socialmedia-marketing",
-    label: "Reddit: r/socialmedia + r/marketing",
-    apiPath: "/api/signals/reddit?subreddits=socialmedia,marketing",
+    label: "Reddit (fallback): r/socialmedia + r/marketing",
+    apiPath: "/api/signals/reddit?subs=socialmedia,marketing",
   },
 ];
 
@@ -167,10 +178,8 @@ export default function TrendsPage() {
   const router = useRouter();
   const { setSelectedTrend: setCoreSelectedTrend } = useTrendContext();
 
-  // 🔹 Default to LIVE Reddit source for MVP
-  const [sourceId, setSourceId] = useState<TrendSourceId>(
-    "reddit-socialmedia-marketing"
-  );
+  // Stage D: default to primary always-on feed (HN).
+  const [sourceId, setSourceId] = useState<TrendSourceId>("hn-live");
   const [trends, setTrends] = useState<UiTrend[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -198,7 +207,7 @@ export default function TrendsPage() {
       }
 
       try {
-        const res = await fetch(src.apiPath);
+        const res = await fetch(src.apiPath, { cache: "no-store" });
         if (!res.ok) {
           throw new Error(
             `Failed to fetch trends: ${res.status} ${res.statusText}`
@@ -210,6 +219,11 @@ export default function TrendsPage() {
 
         if (!cancelled) {
           setTrends(uiTrends);
+
+          // If upstream explicitly says it's unavailable, surface a friendly message.
+          if (uiTrends.length === 0 && data?.message) {
+            setError(data.message);
+          }
         }
       } catch (err) {
         console.error("[TrendsPage] fetch error:", err);
@@ -256,9 +270,9 @@ export default function TrendsPage() {
         <header className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">Trends</h1>
           <p className="text-sm text-neutral-400">
-            Appatize&apos;s cultural radar surface. This page runs on interpreted
-            trends from our internal mock engine and live Reddit topics, using
-            the same shape we&apos;ll plug future signals into.
+            Appatize&apos;s cultural radar surface. Primary live feed is Hacker
+            News; Reddit is fallback-only. Same Trend shape throughout, so no
+            vendor can break the app.
           </p>
         </header>
 
@@ -337,15 +351,11 @@ export default function TrendsPage() {
                     </span>
                   </div>
 
-                  <p className="text-xs text-neutral-300">
-                    {trend.description}
-                  </p>
+                  <p className="text-xs text-neutral-300">{trend.description}</p>
 
                   <p className="text-[11px] text-neutral-400">
                     Example hook:{" "}
-                    <span className="text-neutral-200">
-                      {trend.exampleHook}
-                    </span>
+                    <span className="text-neutral-200">{trend.exampleHook}</span>
                   </p>
                 </div>
 

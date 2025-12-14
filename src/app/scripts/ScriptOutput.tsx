@@ -7,9 +7,14 @@ import { cleanText } from "@/engine/cleanText";
 
 type StructuredScriptVariant = ScriptVariant & {
   hook?: string;
-  mainBody?: string;
   cta?: string;
   outro?: string;
+
+  /**
+   * Back-compat: older shapes may still send `mainBody`.
+   * If present, we will use it, but canonical is `body`.
+   */
+  mainBody?: string;
 };
 
 type ScriptOutputProps = {
@@ -46,19 +51,27 @@ export default function ScriptOutput({
   }
 
   const labelText = cleanText(variant.label);
-  const angleNameText = variant.angleName
-    ? cleanText(variant.angleName)
-    : null;
+  const angleNameText = variant.angleName ? cleanText(variant.angleName) : null;
   const notesText = variant.notes ? cleanText(variant.notes) : null;
-  const bodyText = cleanText(variant.body ?? "");
 
-  const hookText = variant.hook ? cleanText(variant.hook) : "";
-  const mainBodyText = variant.mainBody ? cleanText(variant.mainBody) : "";
-  const ctaText = variant.cta ? cleanText(variant.cta) : "";
-  const outroText = variant.outro ? cleanText(variant.outro) : "";
+  /**
+   * Canonical:
+   * - `variant.body` is always present (ScriptVariant)
+   * - For structured mode we may receive hook/cta/outro as separate fields
+   * - Some older code paths used `mainBody` — we support it but prefer `body`
+   */
+  const hookText = typeof variant.hook === "string" ? cleanText(variant.hook) : "";
+  const ctaText = typeof variant.cta === "string" ? cleanText(variant.cta) : "";
+  const outroText =
+    typeof variant.outro === "string" ? cleanText(variant.outro) : "";
 
-  const hasStructuredPieces =
-    !!hookText || !!mainBodyText || !!ctaText || !!outroText;
+  // Prefer mainBody if explicitly provided; otherwise use body.
+  const mainBodyText =
+    typeof variant.mainBody === "string" && variant.mainBody.trim()
+      ? cleanText(variant.mainBody)
+      : cleanText(variant.body ?? "");
+
+  const hasStructuredPieces = !!hookText || !!ctaText || !!outroText;
 
   // Build a combined text for copying
   const combinedForCopy = (() => {
@@ -73,7 +86,7 @@ export default function ScriptOutput({
     }
 
     // Fallback: old behaviour, just body
-    return bodyText;
+    return mainBodyText;
   })();
 
   const handleCopy = () => {
@@ -83,7 +96,7 @@ export default function ScriptOutput({
     });
   };
 
-  // 🟣 Fallback view: no structured fields → behave exactly like your current version
+  // 🟣 Fallback view: no structured fields → behave like a classic script block
   if (!hasStructuredPieces) {
     return (
       <div className="mt-4 rounded-xl border border-neutral-800 bg-neutral-950/90 p-4 space-y-4">
@@ -97,8 +110,7 @@ export default function ScriptOutput({
             <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-400">
               {angleNameText && (
                 <span>
-                  Angle:{" "}
-                  <span className="text-neutral-200">{angleNameText}</span>
+                  Angle: <span className="text-neutral-200">{angleNameText}</span>
                 </span>
               )}
               {typeof variant.score === "number" && (
@@ -120,13 +132,11 @@ export default function ScriptOutput({
         </div>
 
         {/* Notes */}
-        {notesText && (
-          <p className="text-xs text-neutral-400 italic">{notesText}</p>
-        )}
+        {notesText && <p className="text-xs text-neutral-400 italic">{notesText}</p>}
 
         {/* Body */}
         <pre className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-neutral-100">
-          {bodyText}
+          {mainBodyText}
         </pre>
       </div>
     );
@@ -138,15 +148,12 @@ export default function ScriptOutput({
       {/* Header row */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="space-y-0.5">
-          <h2 className="text-sm font-semibold text-neutral-100">
-            {labelText}
-          </h2>
+          <h2 className="text-sm font-semibold text-neutral-100">{labelText}</h2>
 
           <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-400">
             {angleNameText && (
               <span>
-                Angle:{" "}
-                <span className="text-neutral-200">{angleNameText}</span>
+                Angle: <span className="text-neutral-200">{angleNameText}</span>
               </span>
             )}
             {typeof variant.score === "number" && (
@@ -173,9 +180,7 @@ export default function ScriptOutput({
           <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400 mb-1">
             Why this works
           </p>
-          <p className="text-xs text-neutral-300 whitespace-pre-wrap">
-            {notesText}
-          </p>
+          <p className="text-xs text-neutral-300 whitespace-pre-wrap">{notesText}</p>
         </div>
       )}
 
@@ -185,9 +190,7 @@ export default function ScriptOutput({
           <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
             Hook
           </p>
-          <p className="text-sm font-medium text-neutral-50">
-            {hookText}
-          </p>
+          <p className="text-sm font-medium text-neutral-50">{hookText}</p>
         </div>
       )}
 
@@ -209,9 +212,7 @@ export default function ScriptOutput({
           <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
             CTA
           </p>
-          <p className="text-sm text-neutral-100">
-            {ctaText}
-          </p>
+          <p className="text-sm text-neutral-100">{ctaText}</p>
         </div>
       )}
 
@@ -221,9 +222,7 @@ export default function ScriptOutput({
           <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
             Outro
           </p>
-          <p className="text-sm text-neutral-100">
-            {outroText}
-          </p>
+          <p className="text-sm text-neutral-100">{outroText}</p>
         </div>
       )}
     </div>
