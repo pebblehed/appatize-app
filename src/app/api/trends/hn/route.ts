@@ -146,6 +146,45 @@ function normalizeText(s: string): string {
     .trim();
 }
 
+/**
+ * Clean an HN-style title so it's usable as a "moment" name.
+ * Deterministic and non-speculative.
+ */
+function cleanTitleForName(rawTitle: string): string {
+  let t = (rawTitle || "").trim();
+
+  // Strip common HN prefixes
+  t = t.replace(/^(show\s+hn|ask\s+hn|launch\s+hn)\s*:\s*/i, "");
+
+  // Collapse whitespace
+  t = t.replace(/\s+/g, " ").trim();
+
+  // Hard cap (keep readable in UI)
+  if (t.length > 80) t = `${t.slice(0, 77)}…`;
+
+  return t;
+}
+
+function isGenericName(name: string): boolean {
+  const n = (name || "").toLowerCase().trim();
+  if (!n) return true;
+  if (n.length < 12) return true;
+
+  const generic = [
+    "emerging tech signal",
+    "developer workflow evolution",
+    "security pressure is rising",
+    "ai tooling and model capability shifts",
+    "web platform changes surfacing",
+    "data and performance focus",
+    "startup/operator chatter",
+    "moment",
+    "trend",
+  ];
+
+  return generic.some((g) => n.startsWith(g));
+}
+
 function tokensFor(title: string, url: string): string[] {
   const domain = hostnameFromUrl(url);
   const raw = normalizeText(`${title} ${domain}`);
@@ -155,6 +194,7 @@ function tokensFor(title: string, url: string): string[] {
     .filter(Boolean)
     .filter((t) => t.length >= 3 && t.length <= 24)
     .filter((t) => !STOPWORDS.has(t));
+
   // De-dupe while preserving order
   const seen = new Set<string>();
   const out: string[] = [];
@@ -192,7 +232,11 @@ function minutesSince(iso?: string): number | null {
   return Math.max(0, Math.round(ms / 60000));
 }
 
-function movementLabelForCluster(scores: number[], createdAtISOs: string[]): string {
+function movementLabelForCluster(
+  scores: number[],
+  createdAtISOs: string[],
+  confidenceBucket?: "low" | "med" | "high"
+): string {
   const maxScore = scores.length ? Math.max(...scores) : 0;
 
   // Use best recency among cluster items
@@ -212,7 +256,17 @@ function movementLabelForCluster(scores: number[], createdAtISOs: string[]): str
       : bestMins < 240
       ? " · today"
       : "";
-  return `${heat}${recency}`;
+
+  const confTag =
+    confidenceBucket === "high"
+      ? " · conf high"
+      : confidenceBucket === "med"
+      ? " · conf med"
+      : confidenceBucket === "low"
+      ? " · conf low"
+      : "";
+
+  return `${heat}${recency}${confTag}`;
 }
 
 /**
@@ -248,7 +302,8 @@ function asHnItem(raw: any): HnItem | null {
   const url = typeof raw?.url === "string" ? raw.url : "";
   const author = typeof raw?.author === "string" ? raw.author : "";
   const score = safeNumber(raw?.score);
-  const createdAtISO = typeof raw?.createdAtISO === "string" ? raw.createdAtISO : undefined;
+  const createdAtISO =
+    typeof raw?.createdAtISO === "string" ? raw.createdAtISO : undefined;
 
   const category = classifyCategory(title, url);
   const domain = url ? hostnameFromUrl(url) : "";
@@ -274,6 +329,7 @@ type Cluster = {
   domains: Map<string, number>;
   scores: number[];
   createdAtISOs: string[];
+  authors: Map<string, number>;
 };
 
 function addToCluster(cluster: Cluster, item: HnItem) {
@@ -283,6 +339,9 @@ function addToCluster(cluster: Cluster, item: HnItem) {
   }
   if (item.domain) {
     cluster.domains.set(item.domain, (cluster.domains.get(item.domain) ?? 0) + 1);
+  }
+  if (item.author) {
+    cluster.authors.set(item.author, (cluster.authors.get(item.author) ?? 0) + 1);
   }
   if (typeof item.score === "number") cluster.scores.push(item.score);
   if (item.createdAtISO) cluster.createdAtISOs.push(item.createdAtISO);
@@ -319,7 +378,7 @@ function clusterItems(items: HnItem[], maxClusters: number): Cluster[] {
       }
     }
 
-    // Thresholds:
+    // Threshold:
     // - If same category and shares enough vocabulary, merge.
     // - Otherwise start a new cluster.
     const SHOULD_MERGE = bestIdx >= 0 && bestScore >= 0.22;
@@ -334,6 +393,7 @@ function clusterItems(items: HnItem[], maxClusters: number): Cluster[] {
         domains: new Map(),
         scores: [],
         createdAtISOs: [],
+        authors: new Map(),
       };
       addToCluster(c, item);
       clusters.push(c);
@@ -349,6 +409,138 @@ function clusterItems(items: HnItem[], maxClusters: number): Cluster[] {
   });
 
   return clusters.slice(0, maxClusters);
+}
+
+function centroidTokensForCluster(cluster: Cluster, n: number): string[] {
+  return [...cluster.tokenCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, n)
+    .map(([t]) => t);
+}
+
+/**
+ * Second-pass merge to reduce near-duplicate moments.
+ * Bounded: only merges within same category using token centroid similarity.
+ */
+function mergeNearDuplicateClusters(clusters: Cluster[]): Cluster[] {
+  const out: Cluster[] = [];
+
+  for (const c of clusters) {
+    let merged = false;
+
+    const cCentroid = centroidTokensForCluster(c, 12);
+
+    for (let i = 0; i < out.length; i++) {
+      const existing = out[i];
+      if (existing.category !== c.category) continue;
+
+      const eCentroid = centroidTokensForCluster(existing, 12);
+      const sim = jaccard(cCentroid, eCentroid);
+
+      // High overlap ⇒ same moment
+      if (sim >= 0.55) {
+        for (const item of c.items) addToCluster(existing, item);
+        merged = true;
+        break;
+      }
+    }
+
+    if (!merged) out.push(c);
+  }
+
+  // Re-sort by max score, then size
+  out.sort((a, b) => {
+    const aMax = a.scores.length ? Math.max(...a.scores) : 0;
+    const bMax = b.scores.length ? Math.max(...b.scores) : 0;
+    if (bMax !== aMax) return bMax - aMax;
+    return b.items.length - a.items.length;
+  });
+
+  return out;
+}
+
+function clamp(n: number, min: number, max: number): number {
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, n));
+}
+
+function clamp01(n: number): number {
+  return clamp(n, 0, 1);
+}
+
+function sigmoid(x: number): number {
+  // bounded, stable
+  const z = clamp(x, -10, 10);
+  return 1 / (1 + Math.exp(-z));
+}
+
+function computeClusterCohesion(cluster: Cluster): number {
+  // Cohesion = avg overlap of items with centroid tokens (0–1)
+  const centroid = centroidTokensForCluster(cluster, 12);
+  if (centroid.length === 0 || cluster.items.length === 0) return 0;
+
+  let sum = 0;
+  let count = 0;
+  for (const it of cluster.items) {
+    if (!it.tokens?.length) continue;
+    sum += jaccard(it.tokens, centroid);
+    count += 1;
+  }
+  if (count === 0) return 0;
+  return clamp01(sum / count);
+}
+
+function computeClusterConfidence(cluster: Cluster): number {
+  // Evidence components derived ONLY from the cluster (no new sources).
+  const size = cluster.items.length;
+  const maxScore = cluster.scores.length ? Math.max(...cluster.scores) : 0;
+  const uniqueAuthors = cluster.authors.size;
+  const uniqueDomains = cluster.domains.size;
+
+  // Recency: use best (most recent) item
+  const mins: number[] = [];
+  for (const iso of cluster.createdAtISOs) {
+    const m = minutesSince(iso);
+    if (m !== null) mins.push(m);
+  }
+  const bestMins = mins.length ? Math.min(...mins) : null;
+
+  // Freshness: soft decay over 24h, but never collapses to 0
+  const freshness = bestMins === null ? 0.6 : clamp01(1 - bestMins / (24 * 60));
+  const freshnessSoft = 0.55 + 0.45 * freshness;
+
+  // Cohesion: do these items actually belong together?
+  const cohesion = computeClusterCohesion(cluster); // 0–1
+
+  // Evidence: log-ish signals, stable and non-jittery
+  const E =
+    0.32 * Math.log1p(size) +
+    0.20 * Math.log1p(uniqueAuthors) +
+    0.18 * Math.log1p(uniqueDomains) +
+    0.30 * sigmoid((maxScore - 15) / 10);
+
+  // Quality: cohesion matters
+  const Q = 0.35 + 0.65 * cohesion;
+
+  // Combine, clamp
+  const raw = clamp01(E * Q) * freshnessSoft;
+
+  // Floor: never below 0.15, cap at 0.98 (prevents fake certainty)
+  return clamp(raw, 0.15, 0.98);
+}
+
+function statusFromConfidence(conf: number, bestMins: number | null): string {
+  // Keep output within the existing status string contract.
+  // Deterministic mapping: emerging / peaking / stable
+  if (conf >= 0.72 && (bestMins === null || bestMins <= 240)) return "peaking";
+  if (conf >= 0.62) return "stable";
+  return "emerging";
+}
+
+function confidenceBucket(conf: number): "low" | "med" | "high" {
+  if (conf >= 0.72) return "high";
+  if (conf >= 0.50) return "med";
+  return "low";
 }
 
 /**
@@ -373,82 +565,122 @@ function clusterToTrend(cluster: Cluster, index: number): ApiTrend {
     .map((i) => i.title)
     .filter(Boolean);
 
-  // Human-readable moment name
+  // Compute confidence + status deterministically (no schema changes)
+  const conf = computeClusterConfidence(cluster);
+
+  const mins: number[] = [];
+  for (const iso of cluster.createdAtISOs) {
+    const m = minutesSince(iso);
+    if (m !== null) mins.push(m);
+  }
+  const bestMins = mins.length ? Math.min(...mins) : null;
+
+  const status = statusFromConfidence(conf, bestMins);
+  const confBucket = confidenceBucket(conf);
+
+  // Name: prefer representative cleaned title from highest-signal item
   const name = (() => {
-    // If we have strong shared tokens, use them
-    if (topTokens.length >= 2) {
-      const head = topTokens.slice(0, 3).join(" ");
+    // Pick representative item by: score desc, then token overlap with centroid
+    const centroid = centroidTokensForCluster(cluster, 12);
+
+    const ranked = [...cluster.items].sort((a, b) => {
+      const aScore = typeof a.score === "number" ? a.score : 0;
+      const bScore = typeof b.score === "number" ? b.score : 0;
+      if (bScore !== aScore) return bScore - aScore;
+
+      const aSim = jaccard(a.tokens, centroid);
+      const bSim = jaccard(b.tokens, centroid);
+      if (bSim !== aSim) return bSim - aSim;
+
+      return (b.title?.length ?? 0) - (a.title?.length ?? 0);
+    });
+
+    const candidate = cleanTitleForName(ranked[0]?.title ?? "");
+    if (candidate && !isGenericName(candidate)) return candidate;
+
+    // Fallback: token-based name (bounded, non-speculative)
+    const head = topTokens.slice(0, 3).join(" ");
+    if (head) {
       switch (cluster.category) {
         case "ai":
-          return `AI tooling and model capability shifts: ${head}`;
+          return `AI moment: ${head}`;
         case "security":
-          return `Security pressure is rising: ${head}`;
+          return `Security moment: ${head}`;
         case "devtools":
-          return `Developer workflow evolution: ${head}`;
+          return `Devtools moment: ${head}`;
         case "web":
-          return `Web platform changes surfacing: ${head}`;
+          return `Web moment: ${head}`;
         case "data":
-          return `Data and performance focus: ${head}`;
+          return `Data moment: ${head}`;
         case "startup":
-          return `Startup/operator chatter: ${head}`;
+          return `Startup moment: ${head}`;
         default:
-          return `Emerging tech signal: ${head}`;
+          return `Tech moment: ${head}`;
       }
     }
 
-    // Fallback: derive from first title
-    const first = cluster.items[0]?.title ?? `Moment ${index + 1}`;
-    return first.length > 72 ? `${first.slice(0, 69)}…` : first;
+    // Last fallback: first title trimmed
+    const first = cleanTitleForName(cluster.items[0]?.title ?? `Moment ${index + 1}`);
+    return first || `Moment ${index + 1}`;
   })();
 
-  // "Why now" description (short + interpretive)
+  // "Why now" description (short + interpretive, deterministic)
   const description = (() => {
     const parts: string[] = [];
 
-    // What this cluster is "about"
+    // Interpretive frame by category (keep it short)
     switch (cluster.category) {
       case "ai":
-        parts.push("Why now: multiple AI-related posts clustering together signals active iteration and adoption pressure.");
+        parts.push("Why now: clustered AI signals suggest active iteration and adoption pressure.");
         break;
       case "security":
-        parts.push("Why now: security topics clustering together signals rising concern and implementation urgency.");
+        parts.push("Why now: clustered security signals suggest rising concern and implementation urgency.");
         break;
       case "devtools":
-        parts.push("Why now: devtools chatter clustering suggests workflow friction points are being actively solved right now.");
+        parts.push("Why now: clustered devtools signals suggest workflow friction is being actively solved.");
         break;
       case "web":
-        parts.push("Why now: web/platform posts clustering indicates shipped changes or new behaviour being noticed in the wild.");
+        parts.push("Why now: clustered web/platform signals suggest shipped changes are being noticed in the wild.");
         break;
       case "data":
-        parts.push("Why now: data/performance themes clustering suggests teams are optimising systems under real constraints.");
+        parts.push("Why now: clustered data/perf signals suggest teams are optimizing under real constraints.");
         break;
       case "startup":
-        parts.push("Why now: operator/startup themes clustering suggests market or builder behaviour is shifting.");
+        parts.push("Why now: clustered operator signals suggest builder behavior or market posture is shifting.");
         break;
       default:
         parts.push("Why now: multiple related signals clustering suggests a real-time theme, not a single headline.");
         break;
     }
 
-    // Add provenance (not a link): source + domain + examples
-    parts.push(`Signal: HN cluster · ${cluster.items.length} items${topDomain ? ` · common source domains incl. ${topDomain}` : ""}.`);
+    // Provenance (not links)
+    parts.push(
+      `Signal: HN cluster · ${cluster.items.length} items` +
+        (topDomain ? ` · common domains incl. ${topDomain}` : "") +
+        `.`
+    );
 
     if (sampleTitles.length > 0) {
-      parts.push(`Examples: ${sampleTitles.join(" · ")}.`);
+      const ex = sampleTitles.map(cleanTitleForName).filter(Boolean).join(" · ");
+      if (ex) parts.push(`Examples: ${ex}.`);
     }
 
     return parts.join(" ");
   })();
 
-  const movement = movementLabelForCluster(cluster.scores, cluster.createdAtISOs);
+  const movement = movementLabelForCluster(
+    cluster.scores,
+    cluster.createdAtISOs,
+    confBucket
+  );
 
-  // Stable ID from category + top tokens
+  // Stable ID from category + top tokens + top domain (deterministic)
   const idSeed = `${cluster.category}|${topTokens.join(",")}|${topDomain ?? ""}`;
   const id = `hn:moment:${hashString(idSeed)}`;
 
   return {
     id,
-    status: "emerging",
+    status,
     name,
     description,
     formatLabel: "HN",
@@ -469,7 +701,9 @@ export async function GET(request: Request) {
     })();
 
     const origin = buildOriginFromRequest(request);
-    const hn = await safeFetchJson(`${origin}/api/signals/hn`);
+    const hn = await safeFetchJson(
+    `${origin}/api/signals/hn?limit=${Math.min(30, limit)}`
+    );
 
     const status = hn?.status;
     const rawItems = Array.isArray(hn?.items) ? hn.items : [];
@@ -504,7 +738,10 @@ export async function GET(request: Request) {
 
     // 2) Cluster into moments (5–8 target)
     const maxClusters = Math.max(5, Math.min(8, Math.ceil(items.length / 3)));
-    const clusters = clusterItems(items, maxClusters);
+    const clustered = clusterItems(items, maxClusters);
+
+    // 2.1) Merge near-duplicates (bounded)
+    const clusters = mergeNearDuplicateClusters(clustered).slice(0, maxClusters);
 
     // 3) Convert clusters into moment-like trends
     const trends = clusters.map((c, i) => clusterToTrend(c, i));

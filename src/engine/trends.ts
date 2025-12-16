@@ -20,7 +20,6 @@ export type Trend = {
   category?: string;
 };
 
-
 /**
  * Where a signal came from.
  * Later we’ll plug real adapters into these.
@@ -40,11 +39,11 @@ export type SignalSource =
 export interface SignalEvent {
   id: string;
   source: SignalSource;
-  label: string;        // e.g. "Street POV micro-vlogs"
-  score: number;        // simple numeric “momentum” score (0–100+)
-  volume?: number;      // optional relative volume
-  tags: string[];       // platform, format, behaviours, etc.
-  timestamp: string;    // ISO date string
+  label: string; // e.g. "Street POV micro-vlogs"
+  score: number; // simple numeric “momentum” score (0–100+)
+  volume?: number; // optional relative volume
+  tags: string[]; // platform, format, behaviours, etc.
+  timestamp: string; // ISO date string
 }
 
 /**
@@ -53,8 +52,8 @@ export interface SignalEvent {
  */
 export interface TrendSignal {
   id: string;
-  key: string;          // canonical key, e.g. "street_pov_micro_vlogs"
-  label: string;        // human-readable trend name
+  key: string; // canonical key, e.g. "street_pov_micro_vlogs"
+  label: string; // human-readable trend name
   description: string;
   signals: SignalEvent[];
   category?: string;
@@ -65,6 +64,10 @@ export interface TrendSignal {
  * TrendSignal[] → Trend[]
  *
  * The Trend type matches what BriefContext and the UI already use.
+ *
+ * Stage D hardening (bounded):
+ * - Momentum labels begin with tokens Fusion already understands ("Hot", "Rising", "New")
+ * - No contract/schema changes
  */
 export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
   return trendSignals.map<Trend>((ts) => {
@@ -75,15 +78,20 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
     let status: TrendStatus;
     let momentumLabel: string;
 
+    /**
+     * IMPORTANT:
+     * Fusion (live trend convergence) parses momentumLabel for "Hot/Rising/New/Score".
+     * Keep these lead tokens stable to avoid under-weighting real peaks.
+     */
     if (avgScore >= 75) {
       status = "Peaking";
-      momentumLabel = "High velocity • Near peak saturation";
+      momentumLabel = "Hot • Near peak saturation";
     } else if (avgScore >= 45) {
       status = "Emerging";
-      momentumLabel = "Rising fast • Early but heating up";
+      momentumLabel = "Rising • Early but heating up";
     } else {
       status = "Stable";
-      momentumLabel = "Consistent presence • Evergreen or niche";
+      momentumLabel = "New • Consistent presence";
     }
 
     return {
@@ -93,9 +101,7 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
       description: ts.description,
 
       // FIXED: derive format from *all* signal tags, not ts.tags
-      formatLabel: deriveFormatLabelFromTags(
-        ts.signals.flatMap((s) => s.tags)
-      ),
+      formatLabel: deriveFormatLabelFromTags(ts.signals.flatMap((s) => s.tags)),
 
       momentumLabel,
       category: ts.category,
@@ -129,9 +135,7 @@ function deriveFormatLabelFromTags(tags: string[]): string {
 export function getMockTrendSignals(): TrendSignal[] {
   const now = new Date().toISOString();
 
-  const s = (
-    overrides: Partial<SignalEvent> & { label: string }
-  ): SignalEvent => ({
+  const s = (overrides: Partial<SignalEvent> & { label: string }): SignalEvent => ({
     id: `signal-${Math.random().toString(36).slice(2)}`,
     source: "manual",
     score: 50,

@@ -42,11 +42,39 @@ async function fetchJson<T>(url: string, signal: AbortSignal): Promise<T> {
   return (await res.json()) as T;
 }
 
+function safeFiniteNumber(n: any, fallback = 0): number {
+  const x = Number(n);
+  return Number.isFinite(x) ? x : fallback;
+}
+
+function safeUrl(raw: any): string | undefined {
+  const s = typeof raw === "string" ? raw.trim() : "";
+  if (!s) return undefined;
+  try {
+    const u = new URL(s);
+    // Keep only http(s)
+    if (u.protocol !== "http:" && u.protocol !== "https:") return undefined;
+    return u.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function safeIsoFromUnixSeconds(raw: any): string | undefined {
+  const sec = typeof raw === "number" ? raw : NaN;
+  if (!Number.isFinite(sec)) return undefined;
+  const d = new Date(sec * 1000);
+  const t = d.getTime();
+  if (!Number.isFinite(t)) return undefined;
+  return d.toISOString();
+}
+
 /**
  * Pull IDs from HN "newstories" and hydrate the first N story items.
- * We keep this minimal and resilient.
+ * Resilient, deterministic, and schema-stable.
  */
 async function fetchHnSignals(limit: number): Promise<HnItem[]> {
+  // One timeout for fetching the ID list
   const { signal, cleanup } = withTimeout(8000);
 
   try {
@@ -55,13 +83,18 @@ async function fetchHnSignals(limit: number): Promise<HnItem[]> {
     const slice = Array.isArray(ids) ? ids.slice(0, Math.min(limit, 30)) : [];
     if (slice.length === 0) return [];
 
-    // Hydrate story items in parallel (small batch)
+    // Hydrate story items in parallel (small batch).
+    // IMPORTANT: use per-item timeouts so one slow item doesn't poison all.
     const rawItems = await Promise.all(
-      slice.map(async (id) => {
+      slice.map(async (hnId) => {
+        const { signal: itemSignal, cleanup: itemCleanup } = withTimeout(3500);
         try {
-          return await fetchJson<any>(`${HN_BASE}/item/${id}.json`, signal);
+          const d = await fetchJson<any>(`${HN_BASE}/item/${hnId}.json`, itemSignal);
+          return d ?? null;
         } catch {
           return null;
+        } finally {
+          itemCleanup();
         }
       })
     );
@@ -72,17 +105,30 @@ async function fetchHnSignals(limit: number): Promise<HnItem[]> {
         const title = String(d?.title ?? "").trim();
         if (!title) return null;
 
+        // Only keep story items (reduces missing url/fields noise)
+        if (typeof d?.type === "string" && d.type !== "story") return null;
+
+        // Must have an HN id to form stable ids downstream
+        const rawId =
+          typeof d?.id === "number" || typeof d?.id === "string"
+            ? String(d.id).trim()
+            : "";
+        if (!rawId) return null;
+
+        const url = safeUrl(d?.url);
+        const author =
+          typeof d?.by === "string" ? String(d.by).trim() : undefined;
+        const score = safeFiniteNumber(d?.score, 0);
+        const createdAtISO = safeIsoFromUnixSeconds(d?.time);
+
         return {
-          id: `hn:${d.id}`,
+          id: `hn:${rawId}`,
           source: "hn",
           title,
-          url: d?.url ? String(d.url) : undefined,
-          author: d?.by ? String(d.by) : undefined,
-          score: typeof d?.score === "number" ? d.score : undefined,
-          createdAtISO:
-            typeof d?.time === "number"
-              ? new Date(d.time * 1000).toISOString()
-              : undefined,
+          url,
+          author,
+          score,
+          createdAtISO,
         } as HnItem;
       })
       .filter(Boolean) as HnItem[];

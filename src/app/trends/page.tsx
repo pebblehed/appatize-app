@@ -30,6 +30,7 @@ type UiTrend = {
  * API response shapes – works with:
  * - /api/trends/mock
  * - /api/trends/hn
+ * - /api/trends/live
  * - /api/signals/reddit?subs=...
  */
 type ApiTrend = {
@@ -46,12 +47,12 @@ type TrendsApiResponse = {
   source?: string;
   trends: ApiTrend[];
   status?: string;
-  count?: number; // ✅ Added: HN adapter returns count
   message?: string;
 };
 
 type TrendSourceId =
   | "hn-live"
+  | "fusion-live"
   | "mock-stage-1"
   | "reddit-entrepreneur"
   | "reddit-socialmedia-marketing";
@@ -65,6 +66,12 @@ const SOURCE_OPTIONS: {
     id: "hn-live",
     label: "Hacker News (LIVE, primary)",
     apiPath: "/api/trends/hn?limit=20",
+  },
+  {
+    id: "fusion-live",
+    label: "Fusion (LIVE): HN + Reddit reinforcement",
+    // Default reddit subs inside the route are socialmedia+marketing.
+    apiPath: "/api/trends/live?limit=20",
   },
   {
     id: "mock-stage-1",
@@ -178,7 +185,7 @@ export default function TrendsPage() {
   const router = useRouter();
   const { setSelectedTrend: setCoreSelectedTrend } = useTrendContext();
 
-  // Stage D: default to primary always-on feed (HN).
+  // Stage D: default stays on primary always-on feed (HN).
   const [sourceId, setSourceId] = useState<TrendSourceId>("hn-live");
   const [trends, setTrends] = useState<UiTrend[]>([]);
   const [loading, setLoading] = useState(false);

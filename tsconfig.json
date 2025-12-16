@@ -18,10 +18,14 @@
         "name": "next"
       }
     ],
+
+    "baseUrl": ".",                 // ✅ ADD (required for aliases)
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],            // existing
+      "@internal/*": ["./internal/*"] // ✅ ADD
     }
   },
+
   "include": [
     "next-env.d.ts",
     "**/*.ts",
