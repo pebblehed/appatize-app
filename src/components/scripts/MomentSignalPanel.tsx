@@ -9,9 +9,12 @@ type MomentSignalLike = {
   culturalTension?: string;
   stakes?: string;
   contentRole?: string;
-  // Support both array (from API) and string (any older shape)
+
+  // Support both array (from API) and string (older shape)
   watchouts?: string | string[];
-  [key: string]: any;
+
+  // Allow unknown future fields without poisoning types
+  [key: string]: unknown;
 };
 
 export type MomentSignalProps = {
@@ -19,6 +22,10 @@ export type MomentSignalProps = {
   error?: string | null;
   signal?: MomentSignalLike | null;
 };
+
+function asString(x: unknown): string | null {
+  return typeof x === "string" && x.trim() ? x : null;
+}
 
 export default function MomentSignalPanel({
   isLoading = false,
@@ -60,15 +67,23 @@ export default function MomentSignalPanel({
     );
   }
 
-  const { coreMoment, culturalTension, stakes, contentRole } = signal;
+  const coreMoment = asString(signal.coreMoment);
+  const culturalTension = asString(signal.culturalTension);
+  const stakes = asString(signal.stakes);
+  const contentRole = asString(signal.contentRole);
 
   const rawWatchouts = signal.watchouts;
-  const normalizedWatchouts = Array.isArray(rawWatchouts)
-    ? rawWatchouts.join("\n• ")
-    : rawWatchouts;
+  const normalizedWatchouts =
+    Array.isArray(rawWatchouts)
+      ? rawWatchouts.filter((x) => typeof x === "string" && x.trim()).join("\n• ")
+      : asString(rawWatchouts);
 
   const hasAny =
-    coreMoment || culturalTension || stakes || contentRole || normalizedWatchouts;
+    !!coreMoment ||
+    !!culturalTension ||
+    !!stakes ||
+    !!contentRole ||
+    !!normalizedWatchouts;
 
   if (!hasAny) {
     return (
@@ -104,9 +119,7 @@ export default function MomentSignalPanel({
             <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
               Core moment
             </p>
-            <p className="whitespace-pre-wrap leading-relaxed">
-              {coreMoment}
-            </p>
+            <p className="whitespace-pre-wrap leading-relaxed">{coreMoment}</p>
           </div>
         )}
 
@@ -126,9 +139,7 @@ export default function MomentSignalPanel({
             <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
               Why this moment matters
             </p>
-            <p className="whitespace-pre-wrap leading-relaxed">
-              {stakes}
-            </p>
+            <p className="whitespace-pre-wrap leading-relaxed">{stakes}</p>
           </div>
         )}
 
@@ -137,9 +148,7 @@ export default function MomentSignalPanel({
             <p className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
               Role of your content
             </p>
-            <p className="whitespace-pre-wrap leading-relaxed">
-              {contentRole}
-            </p>
+            <p className="whitespace-pre-wrap leading-relaxed">{contentRole}</p>
           </div>
         )}
 
@@ -149,7 +158,6 @@ export default function MomentSignalPanel({
               Watch-outs
             </p>
             <p className="whitespace-pre-wrap leading-relaxed">
-              {/* if we joined with bullets, add a leading bullet in UI */}
               {Array.isArray(rawWatchouts)
                 ? `• ${normalizedWatchouts}`
                 : normalizedWatchouts}

@@ -1,4 +1,4 @@
-// components/variant/VariantsTabs.tsx
+// src/components/variant/VariantsTabs.tsx
 "use client";
 
 import React from "react";
@@ -6,10 +6,30 @@ import React from "react";
 export type ScriptVariant = {
   id: string;
   label: string;
+
+  /**
+   * Canonical body text.
+   * ScriptOutput will display this when structured fields aren't present.
+   */
   body: string;
+
+  /**
+   * Optional structured fields (Stage D can return these).
+   * ScriptOutput will use these when present to render Hook/Body/CTA/Outro cleanly.
+   */
+  hook?: string;
+  cta?: string;
+  outro?: string;
+
+  /**
+   * Back-compat: older shapes may still send `mainBody`.
+   * If present, ScriptOutput will prefer it over `body`.
+   */
+  mainBody?: string;
+
   angleName?: string;
   notes?: string;
-  score?: number;        // 0–10 Appatize score
+  score?: number; // 0–10 Appatize score
   isRecommended?: boolean;
 };
 
@@ -65,11 +85,13 @@ export default function VariantTabs({
             ].join(" ")}
           >
             <span>{variant.label}</span>
+
             {typeof variant.score === "number" && (
               <span className="text-[10px] rounded-full px-1.5 py-0.5 bg-neutral-900/80 border border-neutral-700 text-neutral-300">
                 {variant.score.toFixed(1)}
               </span>
             )}
+
             {isRecommended && (
               <span className="text-[9px] uppercase tracking-wide rounded-full px-1.5 py-0.5 bg-emerald-500/20 border border-emerald-400/70 text-emerald-200">
                 Pick

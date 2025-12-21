@@ -1,12 +1,47 @@
 // src/components/scripts/MultiVariantScriptPanel.tsx
 "use client";
 
-import { useState, useMemo } from "react";
-import type { AngleWithVariants, Variant } from "@/lib/intelligence/types";
+import { useMemo, useState } from "react";
+import type { AngleWithVariants, StructuredVariant } from "@/lib/intelligence/types";
 
 interface MultiVariantScriptPanelProps {
   // Full structured result from the engine
   angles: AngleWithVariants[];
+}
+
+function formatScript(variant: StructuredVariant): string {
+  const parts: string[] = [];
+
+  // Hook
+  if (variant.hook?.trim()) {
+    parts.push(variant.hook.trim());
+  }
+
+  // Body
+  if (variant.body?.trim()) {
+    // Add a blank line between sections if hook exists
+    if (parts.length > 0) parts.push("");
+    parts.push(variant.body.trim());
+  }
+
+  // CTA
+  if (variant.cta?.trim()) {
+    if (parts.length > 0) parts.push("");
+    parts.push(variant.cta.trim());
+  }
+
+  // Outro
+  if (variant.outro?.trim()) {
+    if (parts.length > 0) parts.push("");
+    parts.push(variant.outro.trim());
+  }
+
+  // If engine returned empty strings (shouldn’t happen, but never crash)
+  if (parts.length === 0) {
+    return "No script content returned for this variant.";
+  }
+
+  return parts.join("\n");
 }
 
 // This component is a "smart viewer" for Stage D outputs.
@@ -16,43 +51,39 @@ interface MultiVariantScriptPanelProps {
 export default function MultiVariantScriptPanel({
   angles,
 }: MultiVariantScriptPanelProps) {
+  // Empty state guard: no angles yet
+  if (!angles || angles.length === 0) {
+    return (
+      <div className="rounded-xl border border-neutral-800 bg-neutral-950/60 p-6 text-sm text-neutral-400">
+        No scripts generated yet. Run the engine from a brief to see variants here.
+      </div>
+    );
+  }
+
   // Track which angle is selected
-  const [activeAngleId, setActiveAngleId] = useState<string>(
-    angles[0]?.id ?? ""
-  );
+  const [activeAngleId, setActiveAngleId] = useState<string>(angles[0]?.id ?? "");
 
   // Track which variant is selected for the active angle
   const [activeVariantId, setActiveVariantId] = useState<string | null>(null);
 
   // Derive the active angle from state
-  const activeAngle: AngleWithVariants | undefined = useMemo(
-    () => angles.find((a) => a.id === activeAngleId) ?? angles[0],
-    [angles, activeAngleId]
-  );
+  const activeAngle: AngleWithVariants | undefined = useMemo(() => {
+    return angles.find((a) => a.id === activeAngleId) ?? angles[0];
+  }, [angles, activeAngleId]);
 
   // Derive the active variant from active angle + variant selection
-  const activeVariant: Variant | undefined = useMemo(() => {
+  const activeVariant: StructuredVariant | undefined = useMemo(() => {
     if (!activeAngle) return undefined;
 
+    const variants = activeAngle.variants ?? [];
+    if (variants.length === 0) return undefined;
+
     if (activeVariantId) {
-      return (
-        activeAngle.variants.find((v) => v.id === activeVariantId) ??
-        activeAngle.variants[0]
-      );
+      return variants.find((v) => v.id === activeVariantId) ?? variants[0];
     }
 
-    return activeAngle.variants[0];
+    return variants[0];
   }, [activeAngle, activeVariantId]);
-
-  // Empty state guard: no angles yet
-  if (!angles || angles.length === 0) {
-    return (
-      <div className="rounded-xl border border-neutral-800 bg-neutral-950/60 p-6 text-sm text-neutral-400">
-        No scripts generated yet. Run the engine from a brief to see variants
-        here.
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-4">
@@ -60,6 +91,7 @@ export default function MultiVariantScriptPanel({
       <div className="flex flex-wrap gap-2">
         {angles.map((angle) => {
           const isActive = angle.id === activeAngleId;
+
           return (
             <button
               key={angle.id}
@@ -101,17 +133,14 @@ export default function MultiVariantScriptPanel({
               <span className="font-semibold text-neutral-200">POV: </span>
               <span>{activeAngle.pov}</span>
             </div>
+
             <div className="flex flex-col gap-1 sm:flex-row sm:gap-4">
               <div className="flex-1">
-                <span className="font-semibold text-neutral-200">
-                  Cultural Trigger:{" "}
-                </span>
+                <span className="font-semibold text-neutral-200">Cultural Trigger: </span>
                 <span>{activeAngle.culturalTrigger}</span>
               </div>
               <div className="flex-1">
-                <span className="font-semibold text-neutral-200">
-                  Audience Hook:{" "}
-                </span>
+                <span className="font-semibold text-neutral-200">Audience Hook: </span>
                 <span>{activeAngle.audienceHook}</span>
               </div>
             </div>
@@ -128,12 +157,12 @@ export default function MultiVariantScriptPanel({
       )}
 
       {/* Variant Tabs */}
-      {activeAngle && (
+      {activeAngle && activeAngle.variants && activeAngle.variants.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {activeAngle.variants.map((variant, index) => {
             const isActive =
-              variant.id === activeVariantId ||
-              (!activeVariantId && index === 0);
+              variant.id === activeVariantId || (!activeVariantId && index === 0);
+
             const confidence = Math.round(variant.confidence * 100);
 
             return (
@@ -147,9 +176,7 @@ export default function MultiVariantScriptPanel({
                 }`}
               >
                 <span>Variant {index + 1}</span>
-                <span className="text-[10px] opacity-70">
-                  {confidence}% fit
-                </span>
+                <span className="text-[10px] opacity-70">{confidence}% fit</span>
               </button>
             );
           })}
@@ -157,20 +184,24 @@ export default function MultiVariantScriptPanel({
       )}
 
       {/* Active Script Body */}
-      {activeVariant && (
+      {activeVariant ? (
         <div className="rounded-2xl border border-neutral-800 bg-neutral-950/90 p-5 shadow-inner">
           <div className="mb-3 text-[11px] uppercase tracking-wide text-neutral-500">
             Script Output
           </div>
+
           <pre className="whitespace-pre-wrap text-sm leading-relaxed text-neutral-50">
-            {activeVariant.script}
+            {formatScript(activeVariant)}
           </pre>
+
           <div className="mt-4 rounded-lg bg-neutral-900/80 p-3 text-[11px] text-neutral-300">
-            <div className="mb-1 font-semibold text-neutral-200">
-              Structure notes
-            </div>
+            <div className="mb-1 font-semibold text-neutral-200">Structure notes</div>
             <p>{activeVariant.structureNotes}</p>
           </div>
+        </div>
+      ) : (
+        <div className="rounded-xl border border-neutral-800 bg-neutral-950/60 p-6 text-sm text-neutral-400">
+          No variants available for the selected angle.
         </div>
       )}
     </div>

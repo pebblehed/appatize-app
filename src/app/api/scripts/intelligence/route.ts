@@ -3,23 +3,8 @@
 // Stage D — Intelligence Hardening & Signal Stability
 //
 // Stage D.4 — Provenance Enforcement (wired)
-// - Require momentId (from body or brief)
-// - Load D.4 memory record
-// - Enforce provenance: momentId + behaviourVersion + qualificationHash
-// - Return BOTH: legacy shape + envelope { provenance, payload } (UI-safe)
-//
 // Stage D.4.2 — Runtime-safe memory priming (fix)
-// - In-memory store cannot be trusted across serverless instances.
-// - If memory is missing, pull provenance from /api/trends/live and
-//   write the record LOCALLY inside this route instance, then retry.
-//
 // Stage D.5 — Moment Lifecycle, Decay & Drift Control (wired here)
-// - Never time-expire for theatre.
-// - Evaluate moment health from evidence:
-//   - SIS (signal integrity) from live signals (moment-matched)
-//   - ICS (identity continuity) from canonical identity vs live signals
-// - Hard refusal if moment becomes INVALID (insufficient signal / identity drift / missing canonical).
-// - Always return momentHealth in success envelope for explainability.
 
 import { NextResponse } from "next/server";
 import { generateAnglesAndVariantsFromBrief } from "@/lib/intelligence/intelligenceEngine";
@@ -37,7 +22,6 @@ import type {
   IntelligentOutputEnvelope,
 } from "@internal/contracts/INTELLIGENT_OUTPUT_ENVELOPE";
 
-// Stage D.5 evaluator (deterministic)
 import {
   evaluateMomentLifecycle,
   DEFAULT_MOMENT_LIFECYCLE_THRESHOLDS,
@@ -63,6 +47,32 @@ type IntelligenceErrorCode =
   | "ENGINE_EMPTY_SCRIPTS"
   | "ENGINE_ERROR";
 
+type UiExplainBlock = {
+  title?: string;
+  label?: string;
+  kind?: string;
+  message?: string;
+  text?: string;
+  bullets?: string[];
+  details?: Record<string, unknown>;
+};
+
+type UiMomentHealth = {
+  isValid?: boolean;
+  lifecycleState?: string; // UI shows this raw (e.g. "WEAK")
+  lastEvaluatedAt?: string;
+  nextCheckpointAt?: string;
+  sis?: number;
+  ics?: number;
+  thresholds?: { sisPass?: number; icsPass?: number };
+  explain?: UiExplainBlock[];
+  provenance?: {
+    sources?: Array<{ source?: string; ts?: string; id?: string }>;
+    sourceNames?: string[];
+    lastSeenAt?: string;
+  };
+};
+
 type IntelligenceFail = {
   ok: false;
   error: {
@@ -70,6 +80,7 @@ type IntelligenceFail = {
     message: string;
     meta?: Record<string, unknown>;
   };
+  momentHealth?: UiMomentHealth | null;
 };
 
 type IntelligenceOkPayload = {
@@ -78,9 +89,7 @@ type IntelligenceOkPayload = {
   momentSignal: any;
   variants: any[];
   result: ScriptGenerationResult;
-
-  // Stage D.5 explainable moment health
-  momentHealth: any;
+  momentHealth: UiMomentHealth;
 };
 
 /* ------------------------------------------------------------------ */
@@ -105,12 +114,288 @@ function buildOriginFromRequest(request: Request): string {
   }
 }
 
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function asFiniteNumber(x: any): number | undefined {
+  return typeof x === "number" && Number.isFinite(x) ? x : undefined;
+}
+
+function clamp01(x: number) {
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(1, x));
+}
+
+function normalizeExplainBlocks(x: unknown): UiExplainBlock[] {
+  if (!x) return [];
+  return Array.isArray(x) ? (x as UiExplainBlock[]) : [];
+}
+
+/**
+ * IMPORTANT D.5/D.6 DEFENSIVE FIX:
+ * Some lifecycle evaluators will treat missing timestamps as 0/NaN and immediately EXPIRE.
+ * We never mutate persisted memory here; we only ensure the evaluator sees stable fields.
+ */
+function ensureLifecycleTimestamps(rec: MomentMemoryRecord, createdAt?: string) {
+  const qAt =
+    typeof (rec as any)?.qualifiedAt === "string" && (rec as any).qualifiedAt
+      ? (rec as any).qualifiedAt
+      : nowIso();
+
+  const firstSeen =
+    typeof (rec as any)?.firstSeenAt === "string" && (rec as any).firstSeenAt
+      ? (rec as any).firstSeenAt
+      : typeof createdAt === "string" && createdAt
+        ? createdAt
+        : qAt;
+
+  const lastConf =
+    typeof (rec as any)?.lastConfirmedAt === "string" && (rec as any).lastConfirmedAt
+      ? (rec as any).lastConfirmedAt
+      : qAt;
+
+  // Clone only for evaluation safety
+  return {
+    ...(rec as any),
+    qualifiedAt: qAt,
+    firstSeenAt: firstSeen,
+    lastConfirmedAt: lastConf,
+  } as MomentMemoryRecord;
+}
+
+/**
+ * Pull matchedSignals count with correct precedence:
+ * - Prefer evaluator-derived counts if available (even if 0).
+ * - Fall back to signalContext length only if evaluator provided nothing.
+ *
+ * This prevents contradictions like:
+ * "Found 5 live signals..." while evaluator says IDENTITY_DRIFT.
+ */
+function pickMatchedSignalsCount(args: {
+  matchedSignals?: SignalItem[];
+  explain?: UiExplainBlock[];
+}): number {
+  const explain = normalizeExplainBlocks(args.explain);
+
+  // ✅ Prefer engine truth if provided
+  for (const b of explain) {
+    const n = (b?.details as any)?.matchedSignals;
+    if (typeof n === "number" && Number.isFinite(n)) return n; // can be 0
+  }
+
+  // Fallback to our derived context list
+  const ms = Array.isArray(args.matchedSignals) ? args.matchedSignals.length : 0;
+  return ms;
+}
+
+/**
+ * Deterministic D.5 scoring adapter (no theatre):
+ * - SIS (0–100): evidence coverage in this window (saturates at 5 matches)
+ * - ICS (0–100): continuity proxy based on canonical presence + any bound evidence
+ */
+function computeSisIcs(args: {
+  rec: MomentMemoryRecord;
+  matchedSignalsCount: number;
+}): { sis: number; ics: number } {
+  const sis = Math.round(clamp01(args.matchedSignalsCount / 5) * 1000) / 10;
+
+  const sig =
+    Array.isArray((args.rec as any)?.canonical?.signatureKeywords) &&
+    (args.rec as any).canonical.signatureKeywords.length > 0;
+
+  const ent =
+    Array.isArray((args.rec as any)?.canonical?.anchorEntities) &&
+    (args.rec as any).canonical.anchorEntities.length > 0;
+
+  const hasCanonical = sig || ent;
+  const ics = !hasCanonical ? 0 : args.matchedSignalsCount > 0 ? 85 : 25;
+
+  return { sis, ics };
+}
+
+/**
+ * Convert evaluator output (engine-defined) into UI contract.
+ *
+ * D.5 FIX:
+ * - Never show "evidence binding pass" if evaluator declared drift/invalid.
+ * - Prefer evaluator matchedSignals if available.
+ */
+function toUiMomentHealth(args: {
+  momentId: string;
+  evalResult: any;
+  thresholds: any;
+  matchedSignals: SignalItem[];
+  allSources: any[];
+  rec: MomentMemoryRecord;
+}): UiMomentHealth {
+  const ts = nowIso();
+
+  const evalExplain = normalizeExplainBlocks(args.evalResult?.explain);
+  const evalLifecycle =
+    typeof args.evalResult?.lifecycleState === "string" && args.evalResult.lifecycleState.trim()
+      ? args.evalResult.lifecycleState.trim()
+      : undefined;
+
+  const stateRaw =
+    typeof args.evalResult?.state === "string" && args.evalResult.state.trim()
+      ? args.evalResult.state.trim()
+      : "";
+
+  const stateUpper = stateRaw.toUpperCase();
+
+  const invalidReason =
+    typeof args.evalResult?.invalidReason === "string" ? args.evalResult.invalidReason : null;
+
+  const isValid =
+    typeof args.evalResult?.isValid === "boolean"
+      ? args.evalResult.isValid
+      : stateUpper !== "INVALID";
+
+  const lifecycleState =
+    evalLifecycle ??
+    (stateUpper === "VALID"
+      ? "VALID"
+      : stateUpper === "WEAK" || stateUpper === "WEAKENING"
+        ? "WEAK"
+        : stateUpper === "DRIFTING"
+          ? "DRIFT-RISK"
+          : stateUpper === "INVALID"
+            ? "EXPIRED"
+            : stateRaw || "—");
+
+  const sisPass =
+    asFiniteNumber(args.thresholds?.sisPass) ??
+    asFiniteNumber(args.thresholds?.SIS_PASS) ??
+    40;
+
+  const icsPass =
+    asFiniteNumber(args.thresholds?.icsPass) ??
+    asFiniteNumber(args.thresholds?.ICS_PASS) ??
+    60;
+
+  // Matched signals count with correct precedence (engine first)
+  let matchedSignalsCount = pickMatchedSignalsCount({
+    matchedSignals: args.matchedSignals,
+    explain: evalExplain,
+  });
+
+  // If evaluator explicitly declared drift, we must not report binding as pass.
+  if (invalidReason === "IDENTITY_DRIFT") {
+    matchedSignalsCount = 0;
+  }
+
+  const evalSis =
+    asFiniteNumber(args.evalResult?.sis) ??
+    asFiniteNumber(args.evalResult?.scores?.sis) ??
+    asFiniteNumber(args.evalResult?.metrics?.sis);
+
+  const evalIcs =
+    asFiniteNumber(args.evalResult?.ics) ??
+    asFiniteNumber(args.evalResult?.scores?.ics) ??
+    asFiniteNumber(args.evalResult?.metrics?.ics);
+
+  const computed = computeSisIcs({ rec: args.rec, matchedSignalsCount });
+  const sis = typeof evalSis === "number" ? evalSis : computed.sis;
+  const ics = typeof evalIcs === "number" ? evalIcs : computed.ics;
+
+  // Explainability: keep evaluator blocks if present; otherwise build minimal truthful blocks
+  const explain: UiExplainBlock[] =
+    evalExplain.length > 0
+      ? evalExplain
+      : [
+          {
+            kind: isValid ? (lifecycleState === "VALID" ? "pass" : "warn") : "fail",
+            title: `Lifecycle: ${lifecycleState || "UNKNOWN"}`,
+            message: isValid
+              ? lifecycleState === "VALID"
+                ? "Moment passed lifecycle gating for script generation."
+                : "Moment is still usable, but shows weakening/drift risk signals."
+              : "Moment failed lifecycle gating for script generation.",
+            details: invalidReason ? { invalidReason } : undefined,
+          },
+        ];
+
+  // Ensure Evidence binding block exists (and is consistent with invalidReason)
+  const hasEvidenceBlock = explain.some(
+    (b) => (b.title || b.label || "").toLowerCase().includes("evidence")
+  );
+  if (!hasEvidenceBlock) {
+    explain.push({
+      kind: matchedSignalsCount > 0 ? "pass" : "fail",
+      title: "Evidence binding",
+      message:
+        matchedSignalsCount > 0
+          ? `Found ${matchedSignalsCount} live signal(s) that match the moment’s canonical identity.`
+          : invalidReason === "IDENTITY_DRIFT"
+            ? "Canonical binding failed: live signals no longer align with this moment’s governed identity."
+            : "No live signals matched the moment’s canonical identity.",
+      details: { matchedSignals: matchedSignalsCount },
+    });
+  }
+
+  // Drift hint (only when drift actually applies)
+  if (invalidReason === "IDENTITY_DRIFT") {
+    const hasDriftHint = explain.some((b) =>
+      (b.title || b.label || "").toLowerCase().includes("drift")
+    );
+    if (!hasDriftHint) {
+      explain.push({
+        kind: "warn",
+        title: "Identity drift detected",
+        message:
+          "Live signals no longer align with the canonical identity for this moment. Refresh Live moments and choose a currently governed momentId.",
+      });
+    }
+  }
+
+  // Provenance sources (best effort)
+  const sourceList = Array.isArray(args.allSources) ? args.allSources : [];
+  const sources =
+    sourceList.length > 0
+      ? sourceList.map((s, i) => ({
+          source: typeof s?.source === "string" ? s.source : typeof s === "string" ? s : "source",
+          ts,
+          id: typeof s?.id === "string" ? s.id : `src-${i + 1}`,
+        }))
+      : [];
+
+  return {
+    isValid,
+    lifecycleState,
+    lastEvaluatedAt:
+      typeof args.evalResult?.lastEvaluatedAt === "string" ? args.evalResult.lastEvaluatedAt : ts,
+    nextCheckpointAt:
+      typeof args.evalResult?.nextCheckpointAt === "string"
+        ? args.evalResult.nextCheckpointAt
+        : undefined,
+    thresholds: { sisPass, icsPass },
+    sis,
+    ics,
+    explain,
+    provenance: {
+      sources,
+      sourceNames:
+        sources.length === 0 && sourceList.length
+          ? sourceList.filter((x) => typeof x === "string")
+          : undefined,
+      lastSeenAt: ts,
+    },
+  };
+}
+
 function fail(
   code: IntelligenceErrorCode,
   message: string,
-  meta?: Record<string, unknown>
+  meta?: Record<string, unknown>,
+  momentHealth?: UiMomentHealth | null
 ) {
-  const payload: IntelligenceFail = { ok: false, error: { code, message, meta } };
+  const payload: IntelligenceFail = {
+    ok: false,
+    error: { code, message, meta },
+    momentHealth: typeof momentHealth === "undefined" ? undefined : momentHealth,
+  };
+
   // Stage D: never 500
   return NextResponse.json(payload, { status: 200 });
 }
@@ -123,9 +408,7 @@ function buildInputFromBrief(
     brief?.trendLabel || brief?.trend || brief?.title || "Unnamed cultural moment";
 
   const objective: string =
-    brief?.objective ||
-    brief?.goal ||
-    "Drive engagement with culturally-aware short-form content.";
+    brief?.objective || brief?.goal || "Drive engagement with culturally-aware short-form content.";
 
   const audience: string =
     brief?.audience || "People who already engage with this type of content.";
@@ -142,9 +425,6 @@ function buildInputFromBrief(
   return { trendLabel, objective, audience, platform, briefText, behaviour };
 }
 
-/**
- * Hard guard: if the engine returns blank scripts, treat it as a failure.
- */
 function assertNoEmptyScripts(result: ScriptGenerationResult) {
   const failures: Array<{ angleId: string; variantId: string }> = [];
 
@@ -168,10 +448,6 @@ function assertNoEmptyScripts(result: ScriptGenerationResult) {
   }
 }
 
-/**
- * Flatten canonical angles[] → UI variants[]
- * ScriptOutput expects hook/mainBody/cta/outro.
- */
 function flattenVariants(result: ScriptGenerationResult) {
   const variants: Array<{
     id: string;
@@ -228,62 +504,14 @@ function flattenVariants(result: ScriptGenerationResult) {
 }
 
 /* ------------------------------------------------------------------ */
-/* D.5 deterministic identity helpers (for priming + signal matching)  */
+/* D.5 identity helpers + priming (unchanged except timestamp safety)  */
 /* ------------------------------------------------------------------ */
 
 const STOPWORDS = new Set([
-  "the",
-  "a",
-  "an",
-  "and",
-  "or",
-  "of",
-  "to",
-  "in",
-  "on",
-  "for",
-  "with",
-  "by",
-  "from",
-  "as",
-  "at",
-  "is",
-  "are",
-  "was",
-  "were",
-  "be",
-  "been",
-  "being",
-  "this",
-  "that",
-  "these",
-  "those",
-  "it",
-  "its",
-  "into",
-  "over",
-  "under",
-  "about",
-  "how",
-  "why",
-  "what",
-  "when",
-  "where",
-  "your",
-  "my",
-  "we",
-  "you",
-  "i",
-  "our",
-  "their",
-  "they",
-  "them",
-  "via",
-  "new",
-  "show",
-  "hn",
-  "ask",
-  "launch",
+  "the","a","an","and","or","of","to","in","on","for","with","by","from","as","at",
+  "is","are","was","were","be","been","being","this","that","these","those","it",
+  "its","into","over","under","about","how","why","what","when","where","your","my",
+  "we","you","i","our","their","they","them","via","new","show","hn","ask","launch",
 ]);
 
 function normalizeText(s: string): string {
@@ -323,7 +551,6 @@ function extractAnchorEntities(
   max = 8
 ): string[] {
   const text = `${title} ${description}`.replace(/https?:\/\/\S+/g, " ");
-
   const matches =
     text.match(/\b[A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+){0,3}\b/g) || [];
 
@@ -348,14 +575,6 @@ function extractAnchorEntities(
   return out;
 }
 
-/**
- * Build moment-specific signal context from /api/signals payload.
- * We filter signal items to those that match canonical keywords/entities.
- *
- * This keeps D.5 honest:
- * - decay is based on "are there still signals that match this moment?"
- * - not based on age/time theatre
- */
 function buildMomentSignalContext(args: {
   rec: MomentMemoryRecord;
   signalItems: any[];
@@ -384,56 +603,25 @@ function buildMomentSignalContext(args: {
           : "fusion";
 
     const title = typeof it?.title === "string" ? it.title : "";
-    const summary = typeof it?.summary === "string" ? it.summary : ""; // IMPORTANT: now supported
+    const summary = typeof it?.summary === "string" ? it.summary : "";
     const text = `${title} ${summary}`.trim();
     if (!text) continue;
-
-    // If canonical identity is missing, we return empty context;
-    // evaluator will refuse (credibility firewall).
     if (canon.length === 0) continue;
 
     const norm = normalizeText(text);
-
-    // Evidence binding: must mention at least one canonical term
     const hit = canon.some((term) => term && norm.includes(term));
     if (!hit) continue;
 
-    // ✅ D.5 CRITICAL: derive evidence identity deterministically from evidence text.
     const evKeywords = extractKeywords(title, summary, 12);
     const evEntities = extractAnchorEntities(title, summary, evKeywords, 8);
 
-    matched.push({
-      source,
-      text,
-      keywords: evKeywords,
-      entities: evEntities,
-    });
-
-    if (matched.length >= 25) break; // cap for determinism
+    matched.push({ source, text, keywords: evKeywords, entities: evEntities });
+    if (matched.length >= 25) break;
   }
 
-  return {
-    windowLabel: args.windowLabel,
-    signals: matched,
-  };
+  return { windowLabel: args.windowLabel, signals: matched };
 }
 
-
-/* ------------------------------------------------------------------ */
-/* D.4.2 — Memory priming                                              */
-/* ------------------------------------------------------------------ */
-
-/**
- * Prime local moment memory from /api/trends/live (governed surface).
- * Hard rule: only prime if live returns behaviourVersion + qualificationHash.
- *
- * IMPORTANT:
- * - We do NOT "invent" provenance.
- * - We only accept moments that the live governed surface emits.
- *
- * Stage D.5 addition:
- * - We MUST prime canonical identity deterministically from trend name/description.
- */
 async function primeMomentMemoryFromLive(origin: string, momentId: string): Promise<boolean> {
   const live = await safeFetchJson(`${origin}/api/trends/live`);
   const trends = Array.isArray(live?.trends) ? live.trends : [];
@@ -461,23 +649,28 @@ async function primeMomentMemoryFromLive(origin: string, momentId: string): Prom
   const name =
     typeof t?.name === "string" && t.name.trim() ? t.name.trim() : "Cultural moment";
   const description =
-    typeof t?.description === "string" && t.description.trim()
-      ? t.description.trim()
-      : "";
+    typeof t?.description === "string" && t.description.trim() ? t.description.trim() : "";
 
-  // Stage D.5 canonical identity (deterministic)
+  const createdAt =
+    typeof t?.createdAt === "string" && t.createdAt.trim() ? t.createdAt.trim() : nowIso();
+
   const sigKeywords = extractKeywords(name, description, 12);
   const anchorEntities = extractAnchorEntities(name, description, sigKeywords, 8);
 
-  const nowIso = new Date().toISOString();
+  const now = nowIso();
 
-  // Build as plain object first (prevents TS squiggles if contract differs slightly)
   const recordObj = {
     momentId,
     name,
-    // Must align to MomentSourceRef union (hackernews|reddit|fusion)
     sources: [{ source: "fusion", clusterId: momentId }],
-    qualifiedAt: nowIso,
+
+    // Governance
+    qualifiedAt: now,
+
+    // Lifecycle stability (prevents instant EXPIRED)
+    firstSeenAt: createdAt,
+    lastConfirmedAt: now,
+
     decayHorizonHours: 72,
     lifecycleStatus: "active",
     qualification: {
@@ -488,12 +681,7 @@ async function primeMomentMemoryFromLive(origin: string, momentId: string): Prom
     },
     behaviourVersion,
     qualificationHash,
-
-    // D.5 required field for drift detection
-    canonical: {
-      signatureKeywords: sigKeywords,
-      anchorEntities,
-    },
+    canonical: { signatureKeywords: sigKeywords, anchorEntities },
   };
 
   const record = recordObj as unknown as MomentMemoryRecord;
@@ -507,13 +695,6 @@ async function primeMomentMemoryFromLive(origin: string, momentId: string): Prom
   }
 }
 
-/**
- * Build provenance from D.4 moment memory.
- * If missing, attempt to prime memory locally from /api/trends/live once.
- *
- * Stage D.5:
- * - return record for lifecycle evaluation
- */
 async function getProvenanceOrFail(momentId: string, origin: string) {
   let rec = getMomentMemory(momentId);
 
@@ -528,18 +709,33 @@ async function getProvenanceOrFail(momentId: string, origin: string) {
       response: fail(
         "MOMENT_NOT_QUALIFIED",
         "Selected moment is not governed (no Moment Memory record). Go to Trends → refresh Live moments → select a qualified moment → re-create/activate the brief → then generate scripts again.",
-        { momentId }
+        { momentId },
+        {
+          isValid: false,
+          lifecycleState: "ungoverned",
+          lastEvaluatedAt: nowIso(),
+          thresholds: { sisPass: 40, icsPass: 60 },
+          sis: 0,
+          ics: 0,
+          explain: [
+            {
+              kind: "fail",
+              title: "Moment not governed",
+              message: "No Moment Memory record exists for this momentId in this instance.",
+              details: { momentId },
+            },
+          ],
+        }
       ),
     };
   }
 
   const provenance: IntelligenceProvenance = {
     momentId: rec.momentId,
-    behaviourVersion: rec.behaviourVersion,
-    qualificationHash: rec.qualificationHash,
+    behaviourVersion: (rec as any).behaviourVersion,
+    qualificationHash: (rec as any).qualificationHash,
   };
 
-  // Hard enforcement
   assertProvenance(provenance);
 
   return { ok: true as const, provenance, rec };
@@ -559,14 +755,9 @@ export async function POST(req: Request) {
 
     const origin = buildOriginFromRequest(req);
 
-    // Strict momentId only (never fall back to brief.id)
     const momentId: string | null =
-      (typeof body?.momentId === "string" && body.momentId.trim()
-        ? body.momentId.trim()
-        : null) ??
-      (typeof brief?.momentId === "string" && brief.momentId.trim()
-        ? brief.momentId.trim()
-        : null);
+      (typeof body?.momentId === "string" && body.momentId.trim() ? body.momentId.trim() : null) ??
+      (typeof brief?.momentId === "string" && brief.momentId.trim() ? brief.momentId.trim() : null);
 
     if (!momentId) {
       return fail(
@@ -578,7 +769,6 @@ export async function POST(req: Request) {
     const prov = await getProvenanceOrFail(momentId, origin);
     if (!prov.ok) return prov.response;
 
-    // Stage D gate: intelligence only runs if signals are available + non-empty.
     const signals = await safeFetchJson(`${origin}/api/signals`);
     const available = Boolean(signals?.available);
     const items = Array.isArray(signals?.items) ? signals.items : [];
@@ -588,7 +778,24 @@ export async function POST(req: Request) {
       return fail(
         "SIGNALS_UNAVAILABLE",
         "Signals unavailable: no healthy upstream sources.",
-        { sources }
+        { sources },
+        {
+          isValid: false,
+          lifecycleState: "signals-unavailable",
+          lastEvaluatedAt: nowIso(),
+          thresholds: { sisPass: 40, icsPass: 60 },
+          sis: 0,
+          ics: 0,
+          explain: [
+            {
+              kind: "fail",
+              title: "Signals unavailable",
+              message: "No healthy upstream sources.",
+              details: { sources },
+            },
+          ],
+          provenance: { sourceNames: sources, lastSeenAt: nowIso() },
+        }
       );
     }
 
@@ -596,17 +803,49 @@ export async function POST(req: Request) {
       return fail(
         "SIGNALS_EMPTY",
         "Signals available but empty: no usable signal items returned.",
-        { sources }
+        { sources },
+        {
+          isValid: false,
+          lifecycleState: "signals-empty",
+          lastEvaluatedAt: nowIso(),
+          thresholds: { sisPass: 40, icsPass: 60 },
+          sis: 0,
+          ics: 0,
+          explain: [
+            {
+              kind: "fail",
+              title: "Signals empty",
+              message: "Upstream sources returned zero usable items.",
+              details: { sources },
+            },
+          ],
+          provenance: { sourceNames: sources, lastSeenAt: nowIso() },
+        }
       );
     }
 
-    // Stage D.5 — Lifecycle evaluation (evidence-based, explainable)
-    // Credibility firewall: canonical identity required for drift detection.
     if (!prov.rec?.canonical) {
       return fail(
         "MOMENT_CANONICAL_MISSING",
         "Moment canonical identity is missing. Refresh Live moments (to rewrite memory) and select a qualified moment again.",
-        { momentId }
+        { momentId },
+        {
+          isValid: false,
+          lifecycleState: "canonical-missing",
+          lastEvaluatedAt: nowIso(),
+          thresholds: { sisPass: 40, icsPass: 60 },
+          sis: 0,
+          ics: 0,
+          explain: [
+            {
+              kind: "fail",
+              title: "Canonical identity missing",
+              message: "No canonical.signatureKeywords / anchorEntities on memory record.",
+              details: { momentId },
+            },
+          ],
+          provenance: { sourceNames: sources, lastSeenAt: nowIso() },
+        }
       );
     }
 
@@ -616,28 +855,41 @@ export async function POST(req: Request) {
       windowLabel: "latest_signals",
     });
 
-    const momentHealth = evaluateMomentLifecycle({
-      memory: prov.rec,
+    // ✅ Lifecycle evaluator must receive stable timestamps (prevents instant EXPIRED)
+    const recForEval = ensureLifecycleTimestamps(prov.rec);
+
+    const evalHealth = evaluateMomentLifecycle({
+      memory: recForEval,
       signalContext: momentSignalContext,
       thresholds: DEFAULT_MOMENT_LIFECYCLE_THRESHOLDS,
     });
 
-    // Hard refusal only when INVALID (never fake it)
-    if (momentHealth.state === "INVALID") {
-      const reason = momentHealth.invalidReason;
+    const uiMomentHealth = toUiMomentHealth({
+      momentId,
+      evalResult: evalHealth,
+      thresholds: DEFAULT_MOMENT_LIFECYCLE_THRESHOLDS,
+      matchedSignals: momentSignalContext.signals ?? [],
+      allSources: sources,
+      rec: recForEval,
+    });
+
+    if (evalHealth?.state === "INVALID" || uiMomentHealth.isValid === false) {
+      const reason = evalHealth?.invalidReason;
 
       if (reason === "IDENTITY_DRIFT") {
         return fail(
           "MOMENT_DRIFTED",
           "Moment identity drifted. Regenerate Live moments and select a currently valid momentId.",
-          { momentId, momentHealth }
+          { momentId },
+          uiMomentHealth
         );
       }
 
       return fail(
         "MOMENT_INVALID",
         "Moment is no longer valid for script generation (insufficient matching live signals). Refresh Live moments and select a currently valid momentId.",
-        { momentId, momentHealth }
+        { momentId },
+        uiMomentHealth
       );
     }
 
@@ -651,7 +903,8 @@ export async function POST(req: Request) {
       return fail(
         "ENGINE_ERROR",
         e?.message ?? "Engine failed while generating scripts. Please try again.",
-        { sources }
+        { sources },
+        uiMomentHealth
       );
     }
 
@@ -662,7 +915,8 @@ export async function POST(req: Request) {
       return fail(
         "ENGINE_EMPTY_SCRIPTS",
         e?.message ?? "Engine returned empty script content.",
-        { sources }
+        { sources },
+        uiMomentHealth
       );
     }
 
@@ -674,12 +928,9 @@ export async function POST(req: Request) {
       momentSignal: (engineResult as any)?.momentSignal ?? null,
       variants,
       result: engineResult,
-
-      // D.5 always returned (VALID/WEAKENING/DRIFTING)
-      momentHealth,
+      momentHealth: uiMomentHealth,
     };
 
-    // Some envelope contracts are strict; cast once to keep TS clean.
     const envelope = {
       provenance: prov.provenance,
       payload: okPayload,
@@ -693,8 +944,7 @@ export async function POST(req: Request) {
     console.error("[/api/scripts/intelligence] Unhandled error", err);
     return fail(
       "ENGINE_ERROR",
-      err?.message ??
-        "Unexpected error while generating script variants. Please try again."
+      err?.message ?? "Unexpected error while generating script variants. Please try again."
     );
   }
 }

@@ -13,6 +13,10 @@
 // Stage D.5:
 // - MUST write canonical identity (signatureKeywords + anchorEntities + identityBasis) into memory
 //
+// Stage D.6:
+// - MUST surface explicit decision semantics: ACT / WAIT / REFRESH
+// - MUST surface confidence trajectory + signal strength (guardrailed)
+//
 // Rule: Never 500. Never fake moments. Never weaken intelligence.
 // NOTE: In single-source hardening, qualifyMoment() can be overly strict.
 //       We use a deterministic fallback qualifier ONLY in single-source mode.
@@ -26,6 +30,14 @@ import type {
 
 import type { MomentMemoryRecord } from "@internal/contracts/MOMENT_MEMORY_RECORD";
 import { writeMomentMemory } from "@internal/cie/momentMemory";
+
+// Stage D.6: decision surfacing (enforced)
+import { surfaceDecision } from "@/lib/intelligence/decisionSurfacing";
+import type {
+  DecisionState,
+  ConfidenceTrajectory,
+  SignalStrength,
+} from "@/lib/intelligence/decisionTypes";
 
 export const dynamic = "force-dynamic";
 
@@ -51,6 +63,13 @@ type ApiTrend = {
   // D.4.2: include provenance so scripts route can prime local memory if needed
   behaviourVersion: string;
   qualificationHash: string;
+
+  // D.6: Decision surfacing fields (guardrailed)
+  decisionState: DecisionState;
+  confidenceTrajectory: ConfidenceTrajectory;
+  signalStrength: SignalStrength;
+  decisionRationale: string;
+  decisionNextStep: string;
 };
 
 type TrendsApiResponse = {
@@ -259,7 +278,11 @@ const BASE_THRESHOLDS: MomentQualityThresholds = {
  * Single-source fallback qualifier (deterministic).
  * ONLY used when qualifyMoment() fails in single-source mode.
  */
-function fallbackSingleSourcePass(name: string, description: string, keywords: string[]) {
+function fallbackSingleSourcePass(
+  name: string,
+  description: string,
+  keywords: string[]
+) {
   if (QUALIFICATION_MODE !== "single-source")
     return { pass: false, coherence: 0, novelty: 0 };
 
@@ -277,6 +300,23 @@ function fallbackSingleSourcePass(name: string, description: string, keywords: s
   const pass = overall >= BASE_THRESHOLDS.minOverall;
 
   return { pass, coherence, novelty };
+}
+
+/**
+ * Stage D.6 helper: derive a normalized qualityScore 0..1 from existing qualification outputs.
+ * This is deterministic surfacing, not new intelligence.
+ */
+function deriveQualityScore(coherenceScore: number, noveltyScore: number): number {
+  const c = Number.isFinite(coherenceScore)
+    ? Math.max(0, Math.min(1, coherenceScore))
+    : 0;
+  const n = Number.isFinite(noveltyScore)
+    ? Math.max(0, Math.min(1, noveltyScore))
+    : 0;
+
+  // Mirror the same weighting shape used in fallback (keep stable across modes).
+  const overall = 0.34 * 0.25 + 0.33 * c + 0.33 * n;
+  return Math.max(0, Math.min(1, overall));
 }
 
 /* ------------------------------------------------------------------ */
@@ -306,7 +346,8 @@ export async function GET(request: Request) {
 
     for (const raw of hnTrendsRaw) {
       const name = typeof raw?.name === "string" ? raw.name.trim() : "";
-      const description = typeof raw?.description === "string" ? raw.description.trim() : "";
+      const description =
+        typeof raw?.description === "string" ? raw.description.trim() : "";
 
       if (!name || !description) continue;
 
@@ -401,13 +442,32 @@ export async function GET(request: Request) {
         })
       );
 
+      // Stage D.6 — decision surfacing inputs (deterministic, conservative)
+      const qualityScore = deriveQualityScore(coherenceScore, noveltyScore);
+      const decision = surfaceDecision({
+        signalCount: signals.length,
+        sourceCount: 1, // single-source mode today (HN)
+        qualityScore,
+        // recentDelta: undefined (defaults STABLE until we track deltas)
+      });
+
       // Write memory (governance + D.5 canonical identity)
       try {
         const record: MomentMemoryRecord = {
           momentId,
           name,
           sources: [{ source: "hackernews", clusterId: momentId }],
+
+          // D.4: governance write
           qualifiedAt: nowIso,
+
+          // D.6: lifecycle stability
+          // Many evaluators rely on these timestamps; missing values can cause NaN expiry.
+          ...( {
+            firstSeenAt: createdAt || nowIso,
+            lastConfirmedAt: nowIso,
+          } as any ),
+
           decayHorizonHours: 72,
           lifecycleStatus: "active",
           qualification: {
@@ -439,12 +499,22 @@ export async function GET(request: Request) {
         name,
         description,
         status: "emerging",
-        formatLabel: QUALIFICATION_MODE === "single-source" ? "HN · single-source" : "Fusion",
+        formatLabel:
+          QUALIFICATION_MODE === "single-source"
+            ? "HN · single-source"
+            : "Fusion",
         momentumLabel: "Early signal",
         category: typeof raw?.category === "string" ? raw.category : "technology",
         createdAt,
         behaviourVersion,
         qualificationHash,
+
+        // D.6 output fields
+        decisionState: decision.decisionState,
+        confidenceTrajectory: decision.confidenceTrajectory,
+        signalStrength: decision.signalStrength,
+        decisionRationale: decision.decisionRationale,
+        decisionNextStep: decision.decisionNextStep,
       });
     }
 
