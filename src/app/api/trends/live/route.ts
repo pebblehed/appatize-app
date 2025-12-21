@@ -10,6 +10,9 @@
 // - MUST write MomentMemoryRecord for every emitted moment
 // - MUST include provenance fields in API response so downstream can prime if needed
 //
+// Stage D.5:
+// - MUST write canonical identity (signatureKeywords + anchorEntities + identityBasis) into memory
+//
 // Rule: Never 500. Never fake moments. Never weaken intelligence.
 // NOTE: In single-source hardening, qualifyMoment() can be overly strict.
 //       We use a deterministic fallback qualifier ONLY in single-source mode.
@@ -80,6 +83,9 @@ async function safeFetchJson(url: string) {
   }
 }
 
+/**
+ * Stable-ish hash used only when upstream doesn't provide a stable moment id.
+ */
 function hashString(input: string): string {
   let h = 2166136261;
   for (let i = 0; i < input.length; i++) {
@@ -89,6 +95,7 @@ function hashString(input: string): string {
   return (h >>> 0).toString(36);
 }
 
+// IMPORTANT: keep extraction rules stable across the system
 const STOPWORDS = new Set([
   "the",
   "a",
@@ -153,6 +160,10 @@ function normalizeText(s: string): string {
     .trim();
 }
 
+/**
+ * Deterministic keyword extraction.
+ * In single-source mode this MUST be title-dominant (because evidence is title-dominant).
+ */
 function extractKeywords(title: string, description: string, max = 12): string[] {
   const raw = normalizeText(`${title} ${description}`);
   const toks = raw
@@ -171,6 +182,52 @@ function extractKeywords(title: string, description: string, max = 12): string[]
     }
     if (out.length >= max) break;
   }
+  return out;
+}
+
+/**
+ * Anchor entities must be compatible with evidence bandwidth.
+ *
+ * Single-source hardening (HN-only):
+ * - We do NOT use "proper noun" extraction from description because the signal bus
+ *   doesn't reliably provide entities yet.
+ * - Instead, we reuse title keywords as "anchors" to avoid false drift.
+ *
+ * Multi-source mode can later re-enable richer extraction safely.
+ */
+function extractAnchorEntitiesSingleSource(keywords: string[], max = 8): string[] {
+  return keywords.slice(0, Math.min(max, keywords.length));
+}
+
+function extractAnchorEntitiesMultiSource(
+  title: string,
+  description: string,
+  keywords: string[],
+  max = 8
+): string[] {
+  const text = `${title} ${description}`.replace(/https?:\/\/\S+/g, " ");
+
+  const matches =
+    text.match(/\b[A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+){0,3}\b/g) || [];
+
+  const cleaned = matches
+    .map((m) => m.trim())
+    .filter(Boolean)
+    .filter((m) => m.length >= 3)
+    .map((m) => m.toLowerCase())
+    .filter((m) => !STOPWORDS.has(m));
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const e of cleaned) {
+    if (!seen.has(e)) {
+      seen.add(e);
+      out.push(e);
+    }
+    if (out.length >= max) break;
+  }
+
+  if (out.length === 0) return keywords.slice(0, Math.min(max, keywords.length));
   return out;
 }
 
@@ -200,28 +257,23 @@ const BASE_THRESHOLDS: MomentQualityThresholds = {
 
 /**
  * Single-source fallback qualifier (deterministic).
- * This is ONLY used when qualifyMoment() fails in single-source mode.
- *
- * We do NOT fabricate: we only approve if the cluster has enough structure:
- * - meaningful title + description
- * - non-trivial keyword set
+ * ONLY used when qualifyMoment() fails in single-source mode.
  */
 function fallbackSingleSourcePass(name: string, description: string, keywords: string[]) {
-  if (QUALIFICATION_MODE !== "single-source") return { pass: false, coherence: 0, novelty: 0 };
+  if (QUALIFICATION_MODE !== "single-source")
+    return { pass: false, coherence: 0, novelty: 0 };
 
   const n = name.trim();
   const d = description.trim();
 
-  // Hard minimums (keeps us honest)
   if (n.length < 12) return { pass: false, coherence: 0, novelty: 0 };
   if (d.length < 60) return { pass: false, coherence: 0, novelty: 0 };
   if (keywords.length < 4) return { pass: false, coherence: 0, novelty: 0 };
 
-  // Deterministic “good enough” component proxies (0..1), not magic.
-  const coherence = Math.min(1, 0.35 + keywords.length * 0.06); // 4 keywords ≈ 0.59
-  const novelty = Math.min(1, 0.25 + Math.min(0.5, d.length / 500)); // longer desc → slightly higher
+  const coherence = Math.min(1, 0.35 + keywords.length * 0.06);
+  const novelty = Math.min(1, 0.25 + Math.min(0.5, d.length / 500));
 
-  const overall = 0.34 * 0.25 + 0.33 * coherence + 0.33 * novelty; // density proxy 0.25
+  const overall = 0.34 * 0.25 + 0.33 * coherence + 0.33 * novelty;
   const pass = overall >= BASE_THRESHOLDS.minOverall;
 
   return { pass, coherence, novelty };
@@ -254,11 +306,11 @@ export async function GET(request: Request) {
 
     for (const raw of hnTrendsRaw) {
       const name = typeof raw?.name === "string" ? raw.name.trim() : "";
-      const description =
-        typeof raw?.description === "string" ? raw.description.trim() : "";
+      const description = typeof raw?.description === "string" ? raw.description.trim() : "";
 
       if (!name || !description) continue;
 
+      // Use upstream id if present; otherwise derive one.
       const momentId =
         typeof raw?.id === "string" && raw.id.trim()
           ? raw.id.trim()
@@ -269,11 +321,29 @@ export async function GET(request: Request) {
           ? raw.createdAt.trim()
           : nowIso;
 
-      const keywords = extractKeywords(name, description, 12);
+      /**
+       * Stage D.5 — Canonical identity extraction
+       *
+       * Single-source mode must be TITLE-DOMINANT.
+       * Evidence bus currently emits HN titles; it does not emit rich entity metadata.
+       * Therefore canonical identity must not depend on description proper nouns.
+       */
+      const identityBasis: "title" | "title+summary" =
+        QUALIFICATION_MODE === "single-source" ? "title" : "title+summary";
+
+      const keywords =
+        QUALIFICATION_MODE === "single-source"
+          ? extractKeywords(name, "", 12)
+          : extractKeywords(name, description, 12);
+
+      const anchorEntities =
+        QUALIFICATION_MODE === "single-source"
+          ? extractAnchorEntitiesSingleSource(keywords, 8)
+          : extractAnchorEntitiesMultiSource(name, description, keywords, 8);
 
       const signals = [
         {
-          source: "hn",
+          source: "hackernews",
           createdAt,
           title: name,
           summary: description,
@@ -281,7 +351,6 @@ export async function GET(request: Request) {
         },
       ];
 
-      // Primary qualification
       const q = qualifyMoment(
         {
           id: momentId,
@@ -308,7 +377,6 @@ export async function GET(request: Request) {
           0
       );
 
-      // Fallback ONLY in single-source mode if qualifyMoment fails everything
       if (!pass) {
         const fb = fallbackSingleSourcePass(name, description, keywords);
         if (!fb.pass) continue;
@@ -321,18 +389,21 @@ export async function GET(request: Request) {
       if (!pass) continue;
 
       const behaviourVersion = "behaviour_v1.0.0";
+
+      // Qualification hash should change if qualification regime changes.
       const qualificationHash = hashString(
         JSON.stringify({
           momentId,
           mode: QUALIFICATION_MODE,
           thresholds: BASE_THRESHOLDS,
           weights: BASE_WEIGHTS,
+          identityBasis,
         })
       );
 
-      // Write memory (governance)
+      // Write memory (governance + D.5 canonical identity)
       try {
-        const record = {
+        const record: MomentMemoryRecord = {
           momentId,
           name,
           sources: [{ source: "hackernews", clusterId: momentId }],
@@ -347,12 +418,19 @@ export async function GET(request: Request) {
           },
           behaviourVersion,
           qualificationHash,
-        } as MomentMemoryRecord;
+          canonical: {
+            signatureKeywords: keywords,
+            anchorEntities,
+            identityBasis,
+          },
+          __writeOnce: true,
+        };
 
-        (record as any).__writeOnce = true;
-        writeMomentMemory(record);
+        // Memory write must never break the surface.
+        // Some implementations are sync; some async — both are safe here.
+        await Promise.resolve(writeMomentMemory(record) as any);
       } catch {
-        // Memory must never break the surface
+        // swallow — live surface must remain stable
       }
 
       qualifiedTrends.push({
@@ -361,7 +439,7 @@ export async function GET(request: Request) {
         name,
         description,
         status: "emerging",
-        formatLabel: "HN · single-source",
+        formatLabel: QUALIFICATION_MODE === "single-source" ? "HN · single-source" : "Fusion",
         momentumLabel: "Early signal",
         category: typeof raw?.category === "string" ? raw.category : "technology",
         createdAt,

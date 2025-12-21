@@ -12,6 +12,14 @@
 // - In-memory store cannot be trusted across serverless instances.
 // - If memory is missing, pull provenance from /api/trends/live and
 //   write the record LOCALLY inside this route instance, then retry.
+//
+// Stage D.5 — Moment Lifecycle, Decay & Drift Control (wired here)
+// - Never time-expire for theatre.
+// - Evaluate moment health from evidence:
+//   - SIS (signal integrity) from live signals (moment-matched)
+//   - ICS (identity continuity) from canonical identity vs live signals
+// - Hard refusal if moment becomes INVALID (insufficient signal / identity drift / missing canonical).
+// - Always return momentHealth in success envelope for explainability.
 
 import { NextResponse } from "next/server";
 import { generateAnglesAndVariantsFromBrief } from "@/lib/intelligence/intelligenceEngine";
@@ -29,6 +37,14 @@ import type {
   IntelligentOutputEnvelope,
 } from "@internal/contracts/INTELLIGENT_OUTPUT_ENVELOPE";
 
+// Stage D.5 evaluator (deterministic)
+import {
+  evaluateMomentLifecycle,
+  DEFAULT_MOMENT_LIFECYCLE_THRESHOLDS,
+  type MomentSignalContext,
+  type SignalItem,
+} from "@internal/mse/lifecycle/evaluateMomentLifecycle";
+
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
@@ -39,6 +55,9 @@ export const runtime = "nodejs";
 type IntelligenceErrorCode =
   | "BAD_REQUEST"
   | "MOMENT_NOT_QUALIFIED"
+  | "MOMENT_INVALID"
+  | "MOMENT_DRIFTED"
+  | "MOMENT_CANONICAL_MISSING"
   | "SIGNALS_UNAVAILABLE"
   | "SIGNALS_EMPTY"
   | "ENGINE_EMPTY_SCRIPTS"
@@ -59,6 +78,9 @@ type IntelligenceOkPayload = {
   momentSignal: any;
   variants: any[];
   result: ScriptGenerationResult;
+
+  // Stage D.5 explainable moment health
+  momentHealth: any;
 };
 
 /* ------------------------------------------------------------------ */
@@ -206,6 +228,198 @@ function flattenVariants(result: ScriptGenerationResult) {
 }
 
 /* ------------------------------------------------------------------ */
+/* D.5 deterministic identity helpers (for priming + signal matching)  */
+/* ------------------------------------------------------------------ */
+
+const STOPWORDS = new Set([
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "of",
+  "to",
+  "in",
+  "on",
+  "for",
+  "with",
+  "by",
+  "from",
+  "as",
+  "at",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "this",
+  "that",
+  "these",
+  "those",
+  "it",
+  "its",
+  "into",
+  "over",
+  "under",
+  "about",
+  "how",
+  "why",
+  "what",
+  "when",
+  "where",
+  "your",
+  "my",
+  "we",
+  "you",
+  "i",
+  "our",
+  "their",
+  "they",
+  "them",
+  "via",
+  "new",
+  "show",
+  "hn",
+  "ask",
+  "launch",
+]);
+
+function normalizeText(s: string): string {
+  return (s || "")
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractKeywords(title: string, description: string, max = 12): string[] {
+  const raw = normalizeText(`${title} ${description}`);
+  const toks = raw
+    .split(" ")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .filter((x) => x.length >= 3 && x.length <= 24)
+    .filter((x) => !STOPWORDS.has(x));
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of toks) {
+    if (!seen.has(t)) {
+      seen.add(t);
+      out.push(t);
+    }
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function extractAnchorEntities(
+  title: string,
+  description: string,
+  keywords: string[],
+  max = 8
+): string[] {
+  const text = `${title} ${description}`.replace(/https?:\/\/\S+/g, " ");
+
+  const matches =
+    text.match(/\b[A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+){0,3}\b/g) || [];
+
+  const cleaned = matches
+    .map((m) => m.trim())
+    .filter(Boolean)
+    .filter((m) => m.length >= 3)
+    .map((m) => m.toLowerCase());
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const e of cleaned) {
+    if (STOPWORDS.has(e)) continue;
+    if (!seen.has(e)) {
+      seen.add(e);
+      out.push(e);
+    }
+    if (out.length >= max) break;
+  }
+
+  if (out.length === 0) return keywords.slice(0, Math.min(max, keywords.length));
+  return out;
+}
+
+/**
+ * Build moment-specific signal context from /api/signals payload.
+ * We filter signal items to those that match canonical keywords/entities.
+ *
+ * This keeps D.5 honest:
+ * - decay is based on "are there still signals that match this moment?"
+ * - not based on age/time theatre
+ */
+function buildMomentSignalContext(args: {
+  rec: MomentMemoryRecord;
+  signalItems: any[];
+  windowLabel: string;
+}): MomentSignalContext {
+  const keywords = Array.isArray((args.rec as any)?.canonical?.signatureKeywords)
+    ? (args.rec as any).canonical.signatureKeywords
+    : [];
+  const entities = Array.isArray((args.rec as any)?.canonical?.anchorEntities)
+    ? (args.rec as any).canonical.anchorEntities
+    : [];
+
+  const canon = [...keywords, ...entities]
+    .map((s) => (typeof s === "string" ? s.trim().toLowerCase() : ""))
+    .filter(Boolean);
+
+  const matched: SignalItem[] = [];
+
+  for (const it of args.signalItems ?? []) {
+    const srcRaw = typeof it?.source === "string" ? it.source.toLowerCase() : "";
+    const source: "hackernews" | "reddit" | "fusion" =
+      srcRaw.includes("reddit")
+        ? "reddit"
+        : srcRaw.includes("hn") || srcRaw.includes("hackernews")
+          ? "hackernews"
+          : "fusion";
+
+    const title = typeof it?.title === "string" ? it.title : "";
+    const summary = typeof it?.summary === "string" ? it.summary : ""; // IMPORTANT: now supported
+    const text = `${title} ${summary}`.trim();
+    if (!text) continue;
+
+    // If canonical identity is missing, we return empty context;
+    // evaluator will refuse (credibility firewall).
+    if (canon.length === 0) continue;
+
+    const norm = normalizeText(text);
+
+    // Evidence binding: must mention at least one canonical term
+    const hit = canon.some((term) => term && norm.includes(term));
+    if (!hit) continue;
+
+    // ✅ D.5 CRITICAL: derive evidence identity deterministically from evidence text.
+    const evKeywords = extractKeywords(title, summary, 12);
+    const evEntities = extractAnchorEntities(title, summary, evKeywords, 8);
+
+    matched.push({
+      source,
+      text,
+      keywords: evKeywords,
+      entities: evEntities,
+    });
+
+    if (matched.length >= 25) break; // cap for determinism
+  }
+
+  return {
+    windowLabel: args.windowLabel,
+    signals: matched,
+  };
+}
+
+
+/* ------------------------------------------------------------------ */
 /* D.4.2 — Memory priming                                              */
 /* ------------------------------------------------------------------ */
 
@@ -216,6 +430,9 @@ function flattenVariants(result: ScriptGenerationResult) {
  * IMPORTANT:
  * - We do NOT "invent" provenance.
  * - We only accept moments that the live governed surface emits.
+ *
+ * Stage D.5 addition:
+ * - We MUST prime canonical identity deterministically from trend name/description.
  */
 async function primeMomentMemoryFromLive(origin: string, momentId: string): Promise<boolean> {
   const live = await safeFetchJson(`${origin}/api/trends/live`);
@@ -241,14 +458,25 @@ async function primeMomentMemoryFromLive(origin: string, momentId: string): Prom
 
   if (!behaviourVersion || !qualificationHash) return false;
 
+  const name =
+    typeof t?.name === "string" && t.name.trim() ? t.name.trim() : "Cultural moment";
+  const description =
+    typeof t?.description === "string" && t.description.trim()
+      ? t.description.trim()
+      : "";
+
+  // Stage D.5 canonical identity (deterministic)
+  const sigKeywords = extractKeywords(name, description, 12);
+  const anchorEntities = extractAnchorEntities(name, description, sigKeywords, 8);
+
   const nowIso = new Date().toISOString();
 
   // Build as plain object first (prevents TS squiggles if contract differs slightly)
   const recordObj = {
     momentId,
-    name:
-      typeof t?.name === "string" && t.name.trim() ? t.name.trim() : "Cultural moment",
-    sources: [{ source: "live-surface", clusterId: momentId }],
+    name,
+    // Must align to MomentSourceRef union (hackernews|reddit|fusion)
+    sources: [{ source: "fusion", clusterId: momentId }],
     qualifiedAt: nowIso,
     decayHorizonHours: 72,
     lifecycleStatus: "active",
@@ -260,13 +488,18 @@ async function primeMomentMemoryFromLive(origin: string, momentId: string): Prom
     },
     behaviourVersion,
     qualificationHash,
+
+    // D.5 required field for drift detection
+    canonical: {
+      signatureKeywords: sigKeywords,
+      anchorEntities,
+    },
   };
 
   const record = recordObj as unknown as MomentMemoryRecord;
   (record as any).__writeOnce = true;
 
   try {
-    // Some implementations return void; treat “no throw” as success
     await Promise.resolve(writeMomentMemory(record) as any);
     return Boolean(getMomentMemory(momentId));
   } catch {
@@ -277,6 +510,9 @@ async function primeMomentMemoryFromLive(origin: string, momentId: string): Prom
 /**
  * Build provenance from D.4 moment memory.
  * If missing, attempt to prime memory locally from /api/trends/live once.
+ *
+ * Stage D.5:
+ * - return record for lifecycle evaluation
  */
 async function getProvenanceOrFail(momentId: string, origin: string) {
   let rec = getMomentMemory(momentId);
@@ -306,7 +542,7 @@ async function getProvenanceOrFail(momentId: string, origin: string) {
   // Hard enforcement
   assertProvenance(provenance);
 
-  return { ok: true as const, provenance };
+  return { ok: true as const, provenance, rec };
 }
 
 /* ------------------------------------------------------------------ */
@@ -364,6 +600,47 @@ export async function POST(req: Request) {
       );
     }
 
+    // Stage D.5 — Lifecycle evaluation (evidence-based, explainable)
+    // Credibility firewall: canonical identity required for drift detection.
+    if (!prov.rec?.canonical) {
+      return fail(
+        "MOMENT_CANONICAL_MISSING",
+        "Moment canonical identity is missing. Refresh Live moments (to rewrite memory) and select a qualified moment again.",
+        { momentId }
+      );
+    }
+
+    const momentSignalContext = buildMomentSignalContext({
+      rec: prov.rec,
+      signalItems: items,
+      windowLabel: "latest_signals",
+    });
+
+    const momentHealth = evaluateMomentLifecycle({
+      memory: prov.rec,
+      signalContext: momentSignalContext,
+      thresholds: DEFAULT_MOMENT_LIFECYCLE_THRESHOLDS,
+    });
+
+    // Hard refusal only when INVALID (never fake it)
+    if (momentHealth.state === "INVALID") {
+      const reason = momentHealth.invalidReason;
+
+      if (reason === "IDENTITY_DRIFT") {
+        return fail(
+          "MOMENT_DRIFTED",
+          "Moment identity drifted. Regenerate Live moments and select a currently valid momentId.",
+          { momentId, momentHealth }
+        );
+      }
+
+      return fail(
+        "MOMENT_INVALID",
+        "Moment is no longer valid for script generation (insufficient matching live signals). Refresh Live moments and select a currently valid momentId.",
+        { momentId, momentHealth }
+      );
+    }
+
     const input = buildInputFromBrief(brief, behaviour);
 
     let engineResult: ScriptGenerationResult;
@@ -397,6 +674,9 @@ export async function POST(req: Request) {
       momentSignal: (engineResult as any)?.momentSignal ?? null,
       variants,
       result: engineResult,
+
+      // D.5 always returned (VALID/WEAKENING/DRIFTING)
+      momentHealth,
     };
 
     // Some envelope contracts are strict; cast once to keep TS clean.

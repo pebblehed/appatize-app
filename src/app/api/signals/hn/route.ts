@@ -8,6 +8,11 @@
 // - Must NEVER 500 (no platform can break the app)
 // - Must always return a contract-safe shape
 // - UI can safely render based on status + items
+//
+// Stage D.5 NOTE:
+// - We emit `summary` so lifecycle/drift evaluation has comparable evidence text.
+// - For Ask HN / Show HN, HN provides `text` (HTML). We strip it deterministically.
+// - For link stories, summary may be empty, but title still carries the core identity.
 
 import { NextResponse } from "next/server";
 
@@ -19,6 +24,7 @@ type HnItem = {
   id: string; // "hn:<id>"
   source: "hn";
   title: string;
+  summary?: string; // Stage D.5 evidence text
   url?: string;
   author?: string;
   score?: number;
@@ -52,7 +58,6 @@ function safeUrl(raw: any): string | undefined {
   if (!s) return undefined;
   try {
     const u = new URL(s);
-    // Keep only http(s)
     if (u.protocol !== "http:" && u.protocol !== "https:") return undefined;
     return u.toString();
   } catch {
@@ -70,11 +75,37 @@ function safeIsoFromUnixSeconds(raw: any): string | undefined {
 }
 
 /**
+ * Deterministic HTML -> plain text
+ * (HN `text` can be HTML for Ask HN / Show HN)
+ */
+function stripHtmlToText(html: any): string {
+  const s = typeof html === "string" ? html : "";
+  if (!s) return "";
+  return s
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<\/?[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function truncate(s: string, max = 280): string {
+  const t = (s || "").trim();
+  if (!t) return "";
+  if (t.length <= max) return t;
+  return `${t.slice(0, max - 1).trim()}…`;
+}
+
+/**
  * Pull IDs from HN "newstories" and hydrate the first N story items.
  * Resilient, deterministic, and schema-stable.
  */
 async function fetchHnSignals(limit: number): Promise<HnItem[]> {
-  // One timeout for fetching the ID list
   const { signal, cleanup } = withTimeout(8000);
 
   try {
@@ -83,8 +114,6 @@ async function fetchHnSignals(limit: number): Promise<HnItem[]> {
     const slice = Array.isArray(ids) ? ids.slice(0, Math.min(limit, 30)) : [];
     if (slice.length === 0) return [];
 
-    // Hydrate story items in parallel (small batch).
-    // IMPORTANT: use per-item timeouts so one slow item doesn't poison all.
     const rawItems = await Promise.all(
       slice.map(async (hnId) => {
         const { signal: itemSignal, cleanup: itemCleanup } = withTimeout(3500);
@@ -105,10 +134,8 @@ async function fetchHnSignals(limit: number): Promise<HnItem[]> {
         const title = String(d?.title ?? "").trim();
         if (!title) return null;
 
-        // Only keep story items (reduces missing url/fields noise)
         if (typeof d?.type === "string" && d.type !== "story") return null;
 
-        // Must have an HN id to form stable ids downstream
         const rawId =
           typeof d?.id === "number" || typeof d?.id === "string"
             ? String(d.id).trim()
@@ -116,15 +143,21 @@ async function fetchHnSignals(limit: number): Promise<HnItem[]> {
         if (!rawId) return null;
 
         const url = safeUrl(d?.url);
-        const author =
-          typeof d?.by === "string" ? String(d.by).trim() : undefined;
+        const author = typeof d?.by === "string" ? String(d.by).trim() : undefined;
         const score = safeFiniteNumber(d?.score, 0);
         const createdAtISO = safeIsoFromUnixSeconds(d?.time);
+
+        // HN provides `text` for Ask HN / Show HN style items.
+        const summaryFromText = truncate(stripHtmlToText(d?.text), 320);
+
+        // If no text exists, we still emit empty summary (title carries identity).
+        const summary = summaryFromText || "";
 
         return {
           id: `hn:${rawId}`,
           source: "hn",
           title,
+          summary,
           url,
           author,
           score,
@@ -152,10 +185,9 @@ export async function GET(request: Request) {
   try {
     const items = await fetchHnSignals(limit);
 
-    // Even if empty, this is still a valid response shape.
     return NextResponse.json({
       source: "hn",
-      mode: "live", // HN is primary and unauthenticated
+      mode: "live",
       status: "ok" as HnSignalStatus,
       count: items.length,
       items,
@@ -163,7 +195,6 @@ export async function GET(request: Request) {
   } catch (err) {
     console.warn("[HNRoute] Signal unavailable:", err);
 
-    // Stage D: never 500
     return NextResponse.json({
       source: "hn",
       mode: "live",

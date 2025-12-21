@@ -203,6 +203,7 @@ export default function ScriptsPage() {
         }
 
         // Other failures remain loud
+        console.log("[/api/scripts/intelligence] full response:", data);
         throw new Error(msg);
       }
 
