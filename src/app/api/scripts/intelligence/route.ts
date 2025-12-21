@@ -2,11 +2,16 @@
 //
 // Stage D — Intelligence Hardening & Signal Stability
 //
-// Rules enforced here:
-// - Never return 500 (no platform can break the app)
-// - Gate intelligence on /api/signals availability
-// - Never silently return empty scripts
-// - Response shape stays compatible with current UI
+// Stage D.4 — Provenance Enforcement (wired)
+// - Require momentId (from body or brief)
+// - Load D.4 memory record
+// - Enforce provenance: momentId + behaviourVersion + qualificationHash
+// - Return BOTH: legacy shape + envelope { provenance, payload } (UI-safe)
+//
+// Stage D.4.2 — Runtime-safe memory priming (fix)
+// - In-memory store cannot be trusted across serverless instances.
+// - If memory is missing, pull provenance from /api/trends/live and
+//   write the record LOCALLY inside this route instance, then retry.
 
 import { NextResponse } from "next/server";
 import { generateAnglesAndVariantsFromBrief } from "@/lib/intelligence/intelligenceEngine";
@@ -16,13 +21,24 @@ import type {
   BehaviourControlsInput,
 } from "@/lib/intelligence/types";
 
-export const dynamic = "force-dynamic";
+import { getMomentMemory, writeMomentMemory } from "@internal/cie/momentMemory";
+import type { MomentMemoryRecord } from "@internal/contracts/MOMENT_MEMORY_RECORD";
+import { assertProvenance } from "@internal/cie/assertProvenance";
+import type {
+  IntelligenceProvenance,
+  IntelligentOutputEnvelope,
+} from "@internal/contracts/INTELLIGENT_OUTPUT_ENVELOPE";
 
-/**
- * Stage D: typed failure codes for UI-safe, loud failures.
- */
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
+/* ------------------------------------------------------------------ */
+/* Types                                                              */
+/* ------------------------------------------------------------------ */
+
 type IntelligenceErrorCode =
   | "BAD_REQUEST"
+  | "MOMENT_NOT_QUALIFIED"
   | "SIGNALS_UNAVAILABLE"
   | "SIGNALS_EMPTY"
   | "ENGINE_EMPTY_SCRIPTS"
@@ -37,13 +53,17 @@ type IntelligenceFail = {
   };
 };
 
-type IntelligenceOk = {
+type IntelligenceOkPayload = {
   ok: true;
   cultural: any;
   momentSignal: any;
   variants: any[];
   result: ScriptGenerationResult;
 };
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                            */
+/* ------------------------------------------------------------------ */
 
 async function safeFetchJson(url: string) {
   try {
@@ -55,10 +75,24 @@ async function safeFetchJson(url: string) {
   }
 }
 
-/**
- * Convert whatever the UI sends as `brief` into the canonical ScriptGenerationInput.
- * Keep this small and forgiving; deeper validation belongs elsewhere later.
- */
+function buildOriginFromRequest(request: Request): string {
+  try {
+    return new URL(request.url).origin;
+  } catch {
+    return "http://localhost:3000";
+  }
+}
+
+function fail(
+  code: IntelligenceErrorCode,
+  message: string,
+  meta?: Record<string, unknown>
+) {
+  const payload: IntelligenceFail = { ok: false, error: { code, message, meta } };
+  // Stage D: never 500
+  return NextResponse.json(payload, { status: 200 });
+}
+
 function buildInputFromBrief(
   brief: any,
   behaviour?: BehaviourControlsInput
@@ -75,10 +109,7 @@ function buildInputFromBrief(
     brief?.audience || "People who already engage with this type of content.";
 
   const platform: string =
-    brief?.platformOverride ||
-    brief?.platformHint ||
-    brief?.platform ||
-    "tiktok";
+    brief?.platformOverride || brief?.platformHint || brief?.platform || "tiktok";
 
   const briefText: string =
     brief?.enhancedBrief ||
@@ -86,36 +117,22 @@ function buildInputFromBrief(
     brief?.summary ||
     "No extended description provided; infer from trendLabel and objective.";
 
-  return {
-    trendLabel,
-    objective,
-    audience,
-    platform,
-    briefText,
-    behaviour,
-  };
+  return { trendLabel, objective, audience, platform, briefText, behaviour };
 }
 
 /**
- * Hard guard: if the engine returns blank scripts, we treat it as a failure.
- * This prevents “variants exist but no scripts” regressions from silently shipping.
+ * Hard guard: if the engine returns blank scripts, treat it as a failure.
  */
 function assertNoEmptyScripts(result: ScriptGenerationResult) {
   const failures: Array<{ angleId: string; variantId: string }> = [];
 
   for (const angle of result.angles ?? []) {
     const angleId = angle?.id ?? "unknown-angle";
-
     for (const v of angle.variants ?? []) {
       const variantId = v?.id ?? "unknown-variant";
-
       const hook = typeof v?.hook === "string" ? v.hook.trim() : "";
       const body = typeof v?.body === "string" ? v.body.trim() : "";
-
-      // At minimum we need *some* script content (hook and/or body).
-      if (!hook && !body) {
-        failures.push({ angleId, variantId });
-      }
+      if (!hook && !body) failures.push({ angleId, variantId });
     }
   }
 
@@ -130,26 +147,17 @@ function assertNoEmptyScripts(result: ScriptGenerationResult) {
 }
 
 /**
- * Compatibility layer:
- * - Current UI expects a flat `variants[]` list.
- * - Canonical engine returns `angles[]` with nested `variants[]`.
- *
- * IMPORTANT:
- * ScriptOutput’s “structured view” expects `hook`, `mainBody`, `cta`, `outro`.
- * So we provide those fields here (and still keep the combined `body` string).
+ * Flatten canonical angles[] → UI variants[]
+ * ScriptOutput expects hook/mainBody/cta/outro.
  */
 function flattenVariants(result: ScriptGenerationResult) {
   const variants: Array<{
     id: string;
     label: string;
     angleName: string;
-
-    // Back-compat (used by older UI paths + copy)
     body: string;
     notes: string;
     score?: number;
-
-    // Structured fields (used by ScriptOutput structured renderer)
     hook?: string;
     mainBody?: string;
     cta?: string;
@@ -167,13 +175,11 @@ function flattenVariants(result: ScriptGenerationResult) {
     for (const v of angle.variants ?? []) {
       i += 1;
 
-      // Trim to avoid “whitespace-only” content counting as real script text
       const hook = typeof v?.hook === "string" ? v.hook.trim() : "";
       const mainBody = typeof v?.body === "string" ? v.body.trim() : "";
       const cta = typeof v?.cta === "string" ? v.cta.trim() : "";
       const outro = typeof v?.outro === "string" ? v.outro.trim() : "";
 
-      // Combined fallback text (safe for copy + legacy renderers)
       const combined = [hook, mainBody, cta ? `CTA: ${cta}` : "", outro]
         .filter((s) => typeof s === "string" && s.trim().length > 0)
         .join("\n\n");
@@ -182,17 +188,12 @@ function flattenVariants(result: ScriptGenerationResult) {
         id: v?.id || `variant-${i}`,
         label: `Variant ${i}`,
         angleName,
-
         body: combined,
         notes: typeof v?.structureNotes === "string" ? v.structureNotes : "",
-
-        // confidence is 0–1 → map to 0–10 (1 decimal place)
         score:
           typeof v?.confidence === "number" && !Number.isNaN(v.confidence)
             ? Math.max(0, Math.min(10, Math.round(v.confidence * 100) / 10))
             : undefined,
-
-        // Structured pieces for ScriptOutput
         hook: hook || undefined,
         mainBody: mainBody || undefined,
         cta: cta || undefined,
@@ -204,34 +205,145 @@ function flattenVariants(result: ScriptGenerationResult) {
   return variants;
 }
 
-function fail(
-  code: IntelligenceErrorCode,
-  message: string,
-  meta?: Record<string, unknown>
-) {
-  const payload: IntelligenceFail = {
-    ok: false,
-    error: { code, message, meta },
+/* ------------------------------------------------------------------ */
+/* D.4.2 — Memory priming                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Prime local moment memory from /api/trends/live (governed surface).
+ * Hard rule: only prime if live returns behaviourVersion + qualificationHash.
+ *
+ * IMPORTANT:
+ * - We do NOT "invent" provenance.
+ * - We only accept moments that the live governed surface emits.
+ */
+async function primeMomentMemoryFromLive(origin: string, momentId: string): Promise<boolean> {
+  const live = await safeFetchJson(`${origin}/api/trends/live`);
+  const trends = Array.isArray(live?.trends) ? live.trends : [];
+
+  const t = trends.find(
+    (x: any) =>
+      (typeof x?.momentId === "string" && x.momentId === momentId) ||
+      (typeof x?.id === "string" && x.id === momentId)
+  );
+
+  if (!t) return false;
+
+  const behaviourVersion =
+    typeof t?.behaviourVersion === "string" && t.behaviourVersion.trim()
+      ? t.behaviourVersion.trim()
+      : "";
+
+  const qualificationHash =
+    typeof t?.qualificationHash === "string" && t.qualificationHash.trim()
+      ? t.qualificationHash.trim()
+      : "";
+
+  if (!behaviourVersion || !qualificationHash) return false;
+
+  const nowIso = new Date().toISOString();
+
+  // Build as plain object first (prevents TS squiggles if contract differs slightly)
+  const recordObj = {
+    momentId,
+    name:
+      typeof t?.name === "string" && t.name.trim() ? t.name.trim() : "Cultural moment",
+    sources: [{ source: "live-surface", clusterId: momentId }],
+    qualifiedAt: nowIso,
+    decayHorizonHours: 72,
+    lifecycleStatus: "active",
+    qualification: {
+      velocityScore: 0,
+      coherenceScore: 0,
+      noveltyScore: 0,
+      qualificationThreshold: 0,
+    },
+    behaviourVersion,
+    qualificationHash,
   };
-  // Stage D: never 500. We fail loudly via typed payload.
-  return NextResponse.json(payload, { status: 200 });
+
+  const record = recordObj as unknown as MomentMemoryRecord;
+  (record as any).__writeOnce = true;
+
+  try {
+    // Some implementations return void; treat “no throw” as success
+    await Promise.resolve(writeMomentMemory(record) as any);
+    return Boolean(getMomentMemory(momentId));
+  } catch {
+    return false;
+  }
 }
+
+/**
+ * Build provenance from D.4 moment memory.
+ * If missing, attempt to prime memory locally from /api/trends/live once.
+ */
+async function getProvenanceOrFail(momentId: string, origin: string) {
+  let rec = getMomentMemory(momentId);
+
+  if (!rec) {
+    await primeMomentMemoryFromLive(origin, momentId);
+    rec = getMomentMemory(momentId);
+  }
+
+  if (!rec) {
+    return {
+      ok: false as const,
+      response: fail(
+        "MOMENT_NOT_QUALIFIED",
+        "Selected moment is not governed (no Moment Memory record). Go to Trends → refresh Live moments → select a qualified moment → re-create/activate the brief → then generate scripts again.",
+        { momentId }
+      ),
+    };
+  }
+
+  const provenance: IntelligenceProvenance = {
+    momentId: rec.momentId,
+    behaviourVersion: rec.behaviourVersion,
+    qualificationHash: rec.qualificationHash,
+  };
+
+  // Hard enforcement
+  assertProvenance(provenance);
+
+  return { ok: true as const, provenance };
+}
+
+/* ------------------------------------------------------------------ */
+/* Route                                                               */
+/* ------------------------------------------------------------------ */
 
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
     const brief = body?.brief ?? null;
-    const behaviour: BehaviourControlsInput | undefined =
-      body?.behaviour ?? undefined;
+    const behaviour: BehaviourControlsInput | undefined = body?.behaviour ?? undefined;
 
-    if (!brief) {
-      return fail("BAD_REQUEST", "Missing 'brief' in request body.");
+    if (!brief) return fail("BAD_REQUEST", "Missing 'brief' in request body.");
+
+    const origin = buildOriginFromRequest(req);
+
+    // Strict momentId only (never fall back to brief.id)
+    const momentId: string | null =
+      (typeof body?.momentId === "string" && body.momentId.trim()
+        ? body.momentId.trim()
+        : null) ??
+      (typeof brief?.momentId === "string" && brief.momentId.trim()
+        ? brief.momentId.trim()
+        : null);
+
+    if (!momentId) {
+      return fail(
+        "BAD_REQUEST",
+        "Missing 'momentId'. Stage D.4 requires body.momentId (preferred) or brief.momentId. Do not use brief.id."
+      );
     }
 
-    // Stage D gate: intelligence only runs if signals are available + non-empty.
-    // IMPORTANT: Use absolute URL only in local dev. For deployment we’ll switch to relative.
-    const signals = await safeFetchJson("http://localhost:3000/api/signals");
+    const prov = await getProvenanceOrFail(momentId, origin);
+    if (!prov.ok) return prov.response;
 
+    // Stage D gate: intelligence only runs if signals are available + non-empty.
+    const signals = await safeFetchJson(`${origin}/api/signals`);
     const available = Boolean(signals?.available);
     const items = Array.isArray(signals?.items) ? signals.items : [];
     const sources = Array.isArray(signals?.sources) ? signals.sources : [];
@@ -252,8 +364,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // Build input from brief (UI data). Signals are currently used for upstream stability gating.
-    // We will pass normalized signals into the engine in the next step (without refactoring the UI).
     const input = buildInputFromBrief(brief, behaviour);
 
     let engineResult: ScriptGenerationResult;
@@ -263,13 +373,11 @@ export async function POST(req: Request) {
       console.error("[/api/scripts/intelligence] Engine error:", e);
       return fail(
         "ENGINE_ERROR",
-        e?.message ??
-          "Engine failed while generating scripts. Please try again.",
+        e?.message ?? "Engine failed while generating scripts. Please try again.",
         { sources }
       );
     }
 
-    // Pro guard: never silently ship empty scripts.
     try {
       assertNoEmptyScripts(engineResult);
     } catch (e: any) {
@@ -281,22 +389,26 @@ export async function POST(req: Request) {
       );
     }
 
-    // Flatten for current UI, while keeping canonical result available.
     const variants = flattenVariants(engineResult);
 
-    const okPayload: IntelligenceOk = {
+    const okPayload: IntelligenceOkPayload = {
       ok: true,
-
-      // Compatibility (current UI)
-      cultural: engineResult.snapshot ?? null,
-      momentSignal: engineResult.momentSignal ?? null,
+      cultural: (engineResult as any)?.snapshot ?? null,
+      momentSignal: (engineResult as any)?.momentSignal ?? null,
       variants,
-
-      // Canonical Stage D output (for new UI surfaces / future work)
       result: engineResult,
     };
 
-    return NextResponse.json(okPayload, { status: 200 });
+    // Some envelope contracts are strict; cast once to keep TS clean.
+    const envelope = {
+      provenance: prov.provenance,
+      payload: okPayload,
+    } as unknown as IntelligentOutputEnvelope<IntelligenceOkPayload>;
+
+    return NextResponse.json(
+      { ...okPayload, provenance: prov.provenance, envelope },
+      { status: 200 }
+    );
   } catch (err: any) {
     console.error("[/api/scripts/intelligence] Unhandled error", err);
     return fail(

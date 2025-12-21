@@ -3,7 +3,7 @@
 
 import React, { useEffect, useState } from "react";
 import { useBriefContext } from "@/context/BriefContext";
-import VariantTabs, { ScriptVariant } from "@/components/variant/VariantsTabs";
+import VariantTabs, { type ScriptVariant } from "@/components/variant/VariantsTabs";
 import ScriptOutput from "./ScriptOutput";
 import { cleanText } from "@/engine/cleanText";
 import AngleTabs from "@/components/scripts/AngleTabs";
@@ -35,12 +35,47 @@ type MomentSignalData = {
 } | null;
 
 // Local default behaviour profile
-const DEFAULT_BEHAVIOUR = {
+const DEFAULT_BEHAVIOUR: BehaviourControlsInput = {
   energy: "steady" as any,
   tone: "clean" as any,
   rhythm: "balanced" as any,
   platform: "ugc-ad" as any,
-} as BehaviourControlsInput;
+};
+
+// --- Stage D response types from /api/scripts/intelligence ---
+
+type IntelligenceFail = {
+  ok: false;
+  error: {
+    code: string;
+    message: string;
+    meta?: Record<string, unknown>;
+  };
+};
+
+type IntelligenceOk = {
+  ok: true;
+  variants: Array<{
+    id?: string;
+    label?: string;
+    body?: string;
+    angleName?: string;
+    notes?: string;
+    score?: number;
+
+    // optional structured fields (backend may include)
+    hook?: string;
+    mainBody?: string;
+    cta?: string;
+    outro?: string;
+  }>;
+  cultural?: CulturalInsight | null;
+  momentSignal?: any;
+  // optional canonical engine output for future use
+  result?: any;
+};
+
+type IntelligenceResponse = IntelligenceOk | IntelligenceFail;
 
 export default function ScriptsPage() {
   const { activeBrief } = useBriefContext();
@@ -66,8 +101,6 @@ export default function ScriptsPage() {
   const [behaviourControls, setBehaviourControls] =
     useState<BehaviourControlsInput>(() => DEFAULT_BEHAVIOUR);
 
-  // If there is NO active brief, clear everything. If there *is* a brief,
-  // we keep whatever behaviourControls the user has set (no auto-reset).
   useEffect(() => {
     if (!activeBrief) {
       setVariants([]);
@@ -82,9 +115,32 @@ export default function ScriptsPage() {
     }
   }, [activeBrief]);
 
+  /**
+   * Stage D.4 strict wiring:
+   * - Only accept brief.momentId
+   * - Do NOT fall back to brief.id (brief.id is a UI key and can drift)
+   */
+  function resolveMomentIdFromBriefStrict(brief: any): string | null {
+    const mid =
+      typeof brief?.momentId === "string" && brief.momentId.trim()
+        ? brief.momentId.trim()
+        : null;
+    return mid ?? null;
+  }
+
   async function handleGenerate() {
     if (!activeBrief) {
       setErrorMsg("No active brief selected. Go to Briefs and pick one first.");
+      return;
+    }
+
+    const momentId = resolveMomentIdFromBriefStrict(activeBrief);
+
+    // Governance guard: no qualified momentId, no scripts.
+    if (!momentId) {
+      setErrorMsg(
+        "This brief isn’t linked to a qualified moment (missing momentId). Go to Trends → choose a Live qualified moment → create/activate a brief from it → then generate scripts."
+      );
       return;
     }
 
@@ -96,65 +152,86 @@ export default function ScriptsPage() {
     setActiveAngleKey(null);
 
     try {
+      // Stage D.4: pass momentId explicitly AND stamp it onto brief for redundancy.
+      const briefForRequest = { ...(activeBrief as any), momentId };
+
       const res = await fetch("/api/scripts/intelligence", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          brief: activeBrief,
+          momentId,
+          brief: briefForRequest,
           behaviour: behaviourControls ?? undefined,
         }),
       });
 
-      if (!res.ok) {
-        let apiMessage: string | undefined;
-        try {
-          const errJson = await res.json();
-          apiMessage =
-            typeof errJson?.error === "string" ? errJson.error : undefined;
-        } catch {
-          // ignore JSON parse errors; fall back to generic
-        }
+      // Stage D: may return HTTP 200 even on failure.
+      const data = (await res.json().catch(() => null)) as
+        | IntelligenceResponse
+        | null;
 
-        if (res.status === 429) {
-          throw new Error(
-            apiMessage ??
-              "Rate limit reached. Please wait a few seconds and try again."
-          );
-        }
-
-        throw new Error(
-          apiMessage ?? `Failed to generate variants (status ${res.status}).`
-        );
+      if (!data) {
+        throw new Error("Unexpected empty response from the intelligence route.");
       }
 
-      const data = (await res.json()) as {
-        variants: ScriptVariant[];
-        cultural?: CulturalInsight | null;
-        // raw momentSignal can have several field names; we normalise it below
-        momentSignal?: any;
-      };
+      // Stage D: typed, UI-safe failures
+      if (data.ok === false) {
+        const code = String(data.error?.code || "ENGINE_ERROR");
+        const msg = String(data.error?.message || "Script generation failed.");
 
-      // ✅ FIX 1: Ensure angleName is ALWAYS a non-empty string so:
-      // - angle grouping is stable
-      // - angle filtering works
-      // - active variant selection doesn't fall out of visibleVariants
-      const normalized =
-        (data.variants || []).map((v, index) => {
-          const fallbackAngleName = v.angleName ?? `Angle ${index + 1}`;
-          return {
-            id: v.id ?? `variant-${index + 1}`,
-            label: v.label ?? `Variant ${index + 1}`,
-            body: v.body ?? "",
-            angleName: fallbackAngleName,
-            notes: v.notes,
-            score:
-              typeof v.score === "number" && !Number.isNaN(v.score)
-                ? Math.max(0, Math.min(10, v.score))
-                : undefined,
-          };
-        }) ?? [];
+        // Stage D.4 — moment governance / memory failure
+        if (code === "MOMENT_NOT_QUALIFIED" || msg.includes("Moment is not qualified")) {
+          const metaHint =
+            data.error?.meta && Object.keys(data.error.meta).length > 0
+              ? ` (meta: ${JSON.stringify(data.error.meta)})`
+              : "";
 
-      // Determine recommended variant (highest score)
+          setVariants([]);
+          setActiveVariantId(null);
+          setRecommendedVariantId(null);
+          setCulturalInsight(null);
+          setMomentSignal(null);
+          setAngleGroups([]);
+          setActiveAngleKey(null);
+
+          setErrorMsg(
+            "Selected moment is not governed (no Moment Memory record). Go to Trends → refresh Live moments → select a qualified moment → re-create/activate the brief from that moment → then generate scripts again." +
+              metaHint
+          );
+
+          return; // ✅ do not throw
+        }
+
+        // Other failures remain loud
+        throw new Error(msg);
+      }
+
+      const rawVariants = Array.isArray(data.variants) ? data.variants : [];
+
+      // Normalize into UI's ScriptVariant shape
+      const normalized: ScriptVariant[] = rawVariants.map((v, index) => {
+        const fallbackAngleName =
+          typeof v.angleName === "string" && v.angleName.trim()
+            ? v.angleName.trim()
+            : `Angle ${index + 1}`;
+
+        return {
+          id: typeof v.id === "string" && v.id.trim() ? v.id : `variant-${index + 1}`,
+          label:
+            typeof v.label === "string" && v.label.trim()
+              ? v.label
+              : `Variant ${index + 1}`,
+          body: typeof v.body === "string" ? v.body : "",
+          angleName: fallbackAngleName,
+          notes: typeof v.notes === "string" ? v.notes : undefined,
+          score:
+            typeof v.score === "number" && !Number.isNaN(v.score)
+              ? Math.max(0, Math.min(10, v.score))
+              : undefined,
+        };
+      });
+
+      // Recommended variant = highest score
       let recommended: string | null = null;
       let bestScore = -1;
 
@@ -196,14 +273,12 @@ export default function ScriptsPage() {
 
       // Choose initial active angle:
       // 1) angle of recommended variant (if any)
-      // 2) otherwise first angle group
+      // 2) otherwise first group
       let initialActiveAngleKey: string | null = null;
 
       if (recommended) {
         const rec = withRecommended.find((v) => v.id === recommended);
-        if (rec?.angleName) {
-          initialActiveAngleKey = rec.angleName;
-        }
+        if (rec?.angleName) initialActiveAngleKey = rec.angleName;
       }
 
       if (!initialActiveAngleKey && groups.length > 0) {
@@ -212,16 +287,15 @@ export default function ScriptsPage() {
 
       setActiveAngleKey(initialActiveAngleKey);
 
-      // ✅ FIX 2: Set the initial active variant from the active angle group
+      // Initial active variant within that angle group
       if (withRecommended.length > 0) {
-        const variantsInInitialAngle =
-          initialActiveAngleKey
-            ? withRecommended.filter((v) => v.angleName === initialActiveAngleKey)
-            : withRecommended;
+        const variantsInInitialAngle = initialActiveAngleKey
+          ? withRecommended.filter((v) => v.angleName === initialActiveAngleKey)
+          : withRecommended;
 
         const initialActiveId =
           (recommended &&
-            variantsInInitialAngle.some((v) => v.id === recommended)
+          variantsInInitialAngle.some((v) => v.id === recommended)
             ? recommended
             : variantsInInitialAngle[0]?.id) ?? withRecommended[0].id;
 
@@ -232,22 +306,17 @@ export default function ScriptsPage() {
         setRecommendedVariantId(null);
       }
 
-      setCulturalInsight(data.cultural ?? null);
+      setCulturalInsight((data as IntelligenceOk).cultural ?? null);
 
-      // 🔧 Normalise momentSignal from API → UI shape
-      const rawSignal = data.momentSignal ?? null;
+      // Normalize momentSignal into UI shape
+      const rawSignal = (data as IntelligenceOk).momentSignal ?? null;
 
       const normalizedSignal: MomentSignalData = rawSignal
         ? {
             coreMoment: rawSignal.coreMoment,
             culturalTension: rawSignal.culturalTension,
-            // API may send whyThisMomentMatters or stakes
-            stakes:
-              rawSignal.stakes ?? rawSignal.whyThisMomentMatters ?? undefined,
-            // API may send roleOfContent or contentRole
-            contentRole:
-              rawSignal.contentRole ?? rawSignal.roleOfContent ?? undefined,
-            // API may send watchouts as array or string
+            stakes: rawSignal.stakes ?? rawSignal.whyThisMomentMatters ?? undefined,
+            contentRole: rawSignal.contentRole ?? rawSignal.roleOfContent ?? undefined,
             watchouts: Array.isArray(rawSignal.watchouts)
               ? rawSignal.watchouts.join(" • ")
               : rawSignal.watchouts ?? undefined,
@@ -308,14 +377,14 @@ export default function ScriptsPage() {
   }
 
   // Hyphen-clean display meta
-  const titleText = cleanText(activeBrief.title || "Untitled brief");
+  const titleText = cleanText((activeBrief as any).title || "Untitled brief");
 
   const rawPlatform =
-    activeBrief.platformOverride || activeBrief.platformHint || null;
+    (activeBrief as any).platformOverride || (activeBrief as any).platformHint || null;
   const platformText = rawPlatform ? cleanText(String(rawPlatform)) : null;
 
-  const objectiveText = activeBrief.objective
-    ? cleanText(activeBrief.objective)
+  const objectiveText = (activeBrief as any).objective
+    ? cleanText((activeBrief as any).objective)
     : null;
 
   return (
@@ -351,22 +420,18 @@ export default function ScriptsPage() {
       {/* Brief meta */}
       <div className="flex flex-wrap justify-between gap-2 rounded-xl border border-neutral-800 bg-neutral-950/80 p-3 text-xs text-neutral-400">
         <div className="space-y-0.5">
-          <p className="line-clamp-1 font-medium text-neutral-200">
-            {titleText}
-          </p>
+          <p className="line-clamp-1 font-medium text-neutral-200">{titleText}</p>
 
           {platformText && (
             <p className="line-clamp-1">
-              Platform:{" "}
-              <span className="text-neutral-200">{platformText}</span>
+              Platform: <span className="text-neutral-200">{platformText}</span>
             </p>
           )}
         </div>
 
         {objectiveText && (
           <p className="max-w-xs text-right text-xs text-neutral-400 line-clamp-2">
-            Objective:{" "}
-            <span className="text-neutral-200">{objectiveText}</span>
+            Objective: <span className="text-neutral-200">{objectiveText}</span>
           </p>
         )}
       </div>
@@ -391,7 +456,7 @@ export default function ScriptsPage() {
       {/* Moment Signal — strategy layer */}
       <MomentSignalPanel signal={momentSignal ?? undefined} />
 
-      {/* Angle tabs (Angle A/B/C with titles) */}
+      {/* Angle tabs */}
       {angleGroups.length > 1 && (
         <AngleTabs
           angles={angleGroups.map((g) => ({
@@ -401,11 +466,8 @@ export default function ScriptsPage() {
           activeAngleId={activeAngleKey}
           onChange={(id) => {
             setActiveAngleKey(id);
-            // When switching angle, reset active variant to the first in that angle group (if any)
             const firstInAngle = variants.find((v) => (v.angleName || "") === id);
-            if (firstInAngle) {
-              setActiveVariantId(firstInAngle.id);
-            }
+            if (firstInAngle) setActiveVariantId(firstInAngle.id);
           }}
         />
       )}

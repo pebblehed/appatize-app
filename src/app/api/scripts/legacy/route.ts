@@ -1,439 +1,356 @@
-// src/app/api/scripts/generate/route.ts
+// src/app/api/scripts/legacy/route.ts
+//
+// Stage D.4 — Legacy Scripts Route (Governed + Non-breaking)
+//
+// This route exists ONLY for older UI paths / historical compatibility.
+// It must NEVER weaken platform stability if called.
+//
+// Rules enforced here:
+// - Never return 500 (always 200 with typed payload)
+// - Require qualified moment provenance (D.4): momentId must exist in memory
+// - Return a governed envelope { provenance, payload }
+// - Avoid localhost hard-coding (works in Vercel)
+
+import { NextRequest, NextResponse } from "next/server";
+import { generateAnglesAndVariantsFromBrief } from "@/lib/intelligence/intelligenceEngine";
+import type {
+  ScriptGenerationInput,
+  ScriptGenerationResult,
+  BehaviourControlsInput,
+} from "@/lib/intelligence/types";
+
+// D.4 provenance enforcement
+import { getMomentMemory } from "@internal/cie/momentMemory";
+import { assertProvenance } from "@internal/cie/assertProvenance";
+import type {
+  IntelligenceProvenance,
+  IntelligentOutputEnvelope,
+} from "@internal/contracts/INTELLIGENT_OUTPUT_ENVELOPE";
+
+export const dynamic = "force-dynamic";
 
 /**
- * DEPRECATED — Stage 3 multi-platform script generator
- *
- * This route was used by the earlier ScriptsWorkbench + multi-platform
- * pipeline. The current Stage 4 Scripts experience uses:
- *
- *   /api/scripts/intelligence  (see src/app/api/scripts/intelligence/route.ts)
- *
- * Keep this file for historical reference and possible future reuse,
- * but it is **not** called by the current Scripts page.
+ * Stage D: typed failure codes for UI-safe, loud failures.
  */
+type LegacyErrorCode =
+  | "BAD_REQUEST"
+  | "MOMENT_NOT_QUALIFIED"
+  | "SIGNALS_UNAVAILABLE"
+  | "SIGNALS_EMPTY"
+  | "ENGINE_EMPTY_SCRIPTS"
+  | "ENGINE_ERROR";
 
-import { NextRequest } from "next/server";
-import OpenAI from "openai";
-
-import type { Brief } from "@/context/BriefContext";
-import { PLATFORM_IDS, type PlatformId } from "@/engine/platforms";
-import { buildScriptPrompt } from "@/engine/scriptEngine";
-import { cleanText } from "@/engine/cleanText";
-
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-type ScriptVariantInternal = {
-  id: string;
-  label: string;
-  body: string;
-  angleName?: string;
-  notes?: string;
-  score?: number;
-  reason?: string;
+type LegacyFail = {
+  ok: false;
+  deprecated: true;
+  error: {
+    code: LegacyErrorCode;
+    message: string;
+    meta?: Record<string, unknown>;
+  };
 };
 
-type CulturalInsight = {
-  culturalContext?: string;
-  momentInsight?: string;
-  flowGuidance?: string;
-  creativePrinciple?: string;
+type LegacyOk = {
+  ok: true;
+  deprecated: true;
+  message: string;
+
+  // Keep a compatible top-level `variants` for older consumers (even if unused now).
+  variants: any[];
+
+  // Optional compat fields (safe to include if present)
+  cultural?: any;
+  momentSignal?: any;
+
+  // Canonical output (future-safe)
+  result: ScriptGenerationResult;
 };
+
+function fail(code: LegacyErrorCode, message: string, meta?: Record<string, unknown>) {
+  const payload: LegacyFail = {
+    ok: false,
+    deprecated: true,
+    error: { code, message, meta },
+  };
+  // Stage D: never 500 — always 200 with typed payload
+  return NextResponse.json(payload, { status: 200 });
+}
+
+function buildOriginFromRequest(request: Request): string {
+  try {
+    return new URL(request.url).origin;
+  } catch {
+    return "http://localhost:3000";
+  }
+}
+
+async function safeFetchJson(url: string) {
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Convert whatever the UI sends as `brief` into the canonical ScriptGenerationInput.
+ * Small + forgiving; deeper validation belongs elsewhere later.
+ */
+function buildInputFromBrief(
+  brief: any,
+  behaviour?: BehaviourControlsInput
+): ScriptGenerationInput {
+  const trendLabel: string =
+    brief?.trendLabel || brief?.trend || brief?.title || "Unnamed cultural moment";
+
+  const objective: string =
+    brief?.objective ||
+    brief?.goal ||
+    "Drive engagement with culturally-aware short-form content.";
+
+  const audience: string =
+    brief?.audience || "People who already engage with this type of content.";
+
+  const platform: string =
+    brief?.platformOverride ||
+    brief?.platformHint ||
+    brief?.platform ||
+    "tiktok";
+
+  const briefText: string =
+    brief?.enhancedBrief ||
+    brief?.description ||
+    brief?.summary ||
+    "No extended description provided; infer from trendLabel and objective.";
+
+  return {
+    trendLabel,
+    objective,
+    audience,
+    platform,
+    briefText,
+    behaviour,
+  };
+}
+
+/**
+ * Hard guard: if the engine returns blank scripts, treat it as a failure.
+ */
+function assertNoEmptyScripts(result: ScriptGenerationResult) {
+  const failures: Array<{ angleId: string; variantId: string }> = [];
+
+  for (const angle of result.angles ?? []) {
+    const angleId = angle?.id ?? "unknown-angle";
+
+    for (const v of angle.variants ?? []) {
+      const variantId = v?.id ?? "unknown-variant";
+      const hook = typeof v?.hook === "string" ? v.hook.trim() : "";
+      const body = typeof v?.body === "string" ? v.body.trim() : "";
+
+      if (!hook && !body) failures.push({ angleId, variantId });
+    }
+  }
+
+  if (failures.length > 0) {
+    const sample = failures.slice(0, 5);
+    throw new Error(
+      `Engine returned empty script content for ${failures.length} variant(s). Example(s): ${sample
+        .map((f) => `${f.angleId}/${f.variantId}`)
+        .join(", ")}`
+    );
+  }
+}
+
+/**
+ * Compatibility layer: flatten canonical angles[] → variants[] (legacy consumers)
+ */
+function flattenVariants(result: ScriptGenerationResult) {
+  const variants: any[] = [];
+  let i = 0;
+
+  for (const angle of result.angles ?? []) {
+    const angleName =
+      typeof angle?.title === "string" && angle.title.trim()
+        ? angle.title.trim()
+        : "Angle";
+
+    for (const v of angle.variants ?? []) {
+      i += 1;
+
+      const hook = typeof v?.hook === "string" ? v.hook.trim() : "";
+      const mainBody = typeof v?.body === "string" ? v.body.trim() : "";
+      const cta = typeof v?.cta === "string" ? v.cta.trim() : "";
+      const outro = typeof v?.outro === "string" ? v.outro.trim() : "";
+
+      const combined = [hook, mainBody, cta ? `CTA: ${cta}` : "", outro]
+        .filter((s) => typeof s === "string" && s.trim().length > 0)
+        .join("\n\n");
+
+      variants.push({
+        id: v?.id || `variant-${i}`,
+        label: `Variant ${i}`,
+        angleName,
+        body: combined,
+        notes: typeof v?.structureNotes === "string" ? v.structureNotes : "",
+        score:
+          typeof v?.confidence === "number" && !Number.isNaN(v.confidence)
+            ? Math.max(0, Math.min(10, Math.round(v.confidence * 100) / 10))
+            : undefined,
+        hook: hook || undefined,
+        mainBody: mainBody || undefined,
+        cta: cta || undefined,
+        outro: outro || undefined,
+      });
+    }
+  }
+
+  return variants;
+}
+
+/**
+ * D.4 provenance enforcement.
+ * If the moment isn't in memory, it isn't a qualified/governed moment.
+ */
+function getProvenanceOrFail(momentId: string) {
+  const rec = getMomentMemory(momentId);
+
+  if (!rec) {
+    return {
+      ok: false as const,
+      response: fail(
+        "MOMENT_NOT_QUALIFIED",
+        "Moment is not qualified (no memory record). Use /api/trends/live to generate qualified moments first, then pass a valid momentId.",
+        { momentId }
+      ),
+    };
+  }
+
+  const provenance: IntelligenceProvenance = {
+    momentId: rec.momentId,
+    behaviourVersion: rec.behaviourVersion,
+    qualificationHash: rec.qualificationHash,
+  };
+
+  // Throws if malformed (we want this to be caught + returned as typed fail)
+  assertProvenance(provenance);
+
+  return { ok: true as const, provenance };
+}
 
 export async function POST(req: NextRequest) {
-  if (!process.env.OPENAI_API_KEY) {
-    return new Response(JSON.stringify({ error: "Missing OPENAI_API_KEY" }), {
-      status: 500,
-    });
-  }
-
-  let body: { brief: Brief };
   try {
-    body = await req.json();
-  } catch {
-    return new Response(JSON.stringify({ error: "Invalid JSON payload" }), {
-      status: 400,
-    });
-  }
+    const body = await req.json().catch(() => ({}));
+    const brief = body?.brief ?? null;
+    const behaviour: BehaviourControlsInput | undefined = body?.behaviour ?? undefined;
 
-  const { brief } = body;
-  if (!brief) {
-    return new Response(JSON.stringify({ error: "Missing brief" }), {
-      status: 400,
-    });
-  }
-
-  // Appatize is multi-platform by design
-  const platformList: PlatformId[] = PLATFORM_IDS;
-
-  const userContextJson = JSON.stringify(
-    {
-      title: brief.title,
-      trend:
-        typeof brief.trend === "string" ? brief.trend : brief.trend?.name,
-      objective: brief.objective,
-      audienceHint: brief.audienceHint,
-      platformHint: brief.platformHint,
-      formatHint: brief.formatHint,
-      outcomeHint: brief.outcomeHint,
-      coreMessage: brief.coreMessage,
-      summary: brief.summary,
-    },
-    null,
-    2
-  );
-
-  try {
-    // 1️⃣ Pass 1: generate scripts + angleName + notes per platform
-    const baseVariants: ScriptVariantInternal[] = await Promise.all(
-      platformList.map(async (platformId, index) => {
-        const platformPrompt = buildScriptPrompt(platformId);
-
-        const completion = await openai.chat.completions.create({
-          model: "gpt-4.1-mini",
-          temperature: 0.7,
-          messages: [
-            {
-              role: "system",
-              content:
-                platformPrompt +
-                "\n\n" +
-                "You are part of an industry-grade Cultural Intelligence Engine. " +
-                "You write native scripts AND annotate the creative angle behind them. " +
-                "Avoid AI-speak. Avoid decorative or stylistic hyphens. " +
-                "Only use hyphens when they are part of official brand or product names (e.g. Spider-Man, Coca-Cola). " +
-                "Never say things like 'drop a same', 'drop a comment', 'drop your thoughts'. " +
-                "Use natural invitations instead (e.g. ask a sharp question, invite a quick reaction). " +
-                "Be sharp and human.",
-            },
-            {
-              role: "user",
-              content: [
-                "Here is the brief context in JSON:",
-                "",
-                userContextJson,
-                "",
-                "For platform:",
-                platformId,
-                "",
-                "1) Write a platform-native script following the structure:",
-                "   HOOK → BODY → OUTRO/CTA → CAPTION.",
-                "",
-                "2) Then analyse your own script and return everything as STRICT JSON with EXACTLY these fields:",
-                "{",
-                '  "script": "full script text as you would want it posted",',
-                '  "angleName": "a short, punchy name for the angle, max 6 words",',
-                '  "notes": "one or two sentences explaining what this angle is doing and why it might land for the audience"',
-                "}",
-                "",
-                "Important:",
-                "- Do NOT add any explanation outside the JSON.",
-                "- Do NOT wrap the JSON in markdown.",
-                "- Do NOT add comments.",
-                "- Avoid stylistic hyphens completely; only keep hyphens that are clearly part of brand / product names.",
-                "- Do NOT use phrases like 'drop a same', 'drop a comment', 'drop your thoughts'.",
-              ].join("\n"),
-            },
-          ],
-        });
-
-        const raw = completion.choices[0]?.message?.content?.trim() ?? "";
-
-        let scriptText = "// No script returned";
-        let angleName: string | undefined;
-        let notes: string | undefined;
-
-        try {
-          const parsed = JSON.parse(raw);
-
-          if (typeof parsed.script === "string") {
-            scriptText = parsed.script;
-          } else {
-            scriptText = raw || scriptText;
-          }
-
-          if (typeof parsed.angleName === "string") {
-            angleName = parsed.angleName;
-          }
-
-          if (typeof parsed.notes === "string") {
-            notes = parsed.notes;
-          }
-        } catch {
-          // Fallback: treat raw as the script if JSON parsing fails.
-          scriptText = raw || scriptText;
-        }
-
-        // Strategic sanitisation for creative text
-        scriptText = cleanText(scriptText);
-        if (angleName) angleName = cleanText(angleName);
-        if (notes) notes = cleanText(notes);
-
-        const prettyLabel =
-          platformId.charAt(0).toUpperCase() + platformId.slice(1);
-
-        return {
-          id: platformId,
-          label: prettyLabel || `Variant ${index + 1}`,
-          body: scriptText,
-          angleName,
-          notes,
-        };
-      })
-    );
-
-    // 2️⃣ Pass 2: comparative scoring across ALL variants
-    const scoringPayload = {
-      brief: JSON.parse(userContextJson),
-      variants: baseVariants.map((v) => ({
-        id: v.id,
-        label: v.label,
-        script: v.body,
-        angleName: v.angleName ?? null,
-        notes: v.notes ?? null,
-      })),
-    };
-
-    let scoredVariants: ScriptVariantInternal[] = baseVariants;
-
-    try {
-      const scoringCompletion = await openai.chat.completions.create({
-        model: "gpt-4.1-mini",
-        temperature: 0.2,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a senior creative strategist for a Cultural Operations Platform. " +
-              "Given a brief and multiple scripts (each with an angle), you compare them " +
-              "and score them relative to each other. Be honest and practical. " +
-              "Avoid hype, avoid AI-speak, avoid stylistic hyphens. " +
-              "Only use hyphens when they are clearly part of brand / product names.",
-          },
-          {
-            role: "user",
-            content: [
-              "Here is the brief context in JSON:",
-              "",
-              JSON.stringify(scoringPayload.brief, null, 2),
-              "",
-              "Here are the generated variants in JSON:",
-              "",
-              JSON.stringify(scoringPayload.variants, null, 2),
-              "",
-              "Analyse ALL of the variants RELATIVE to each other.",
-              "",
-              "Return STRICT JSON with this exact shape:",
-              "{",
-              '  "winnerId": "id of the strongest variant overall",',
-              '  "variants": [',
-              "    {",
-              '      "id": "id matching one of the variants",',
-              '      "score": 0-10 number rating of how strong this angle is for THIS brief and platform, relative to the others,',
-              '      "rank": 1-based rank (1 = best),',
-              '      "reason": "one short sentence explaining why this variant sits at this score/rank"',
-              "    }",
-              "  ]",
-              "}",
-              "",
-              "Rules:",
-              "- Scores MUST be differentiated. Do not give them all the same score.",
-              "- Use the full 0–10 range where appropriate (e.g., 9s for standouts, 5–7 for solid, below 5 for weak fits).",
-              "- Do NOT include any commentary outside the JSON.",
-              "- Do NOT wrap the JSON in markdown.",
-              "- Avoid stylistic hyphens; only keep brand / product-name hyphens.",
-            ].join("\n"),
-          },
-        ],
-      });
-
-      const scoringRaw =
-        scoringCompletion.choices[0]?.message?.content?.trim() ?? "";
-
-      type ScoringResult = {
-        winnerId?: string;
-        variants?: {
-          id: string;
-          score?: number;
-          rank?: number;
-          reason?: string;
-        }[];
-      };
-
-      let scoring: ScoringResult | null = null;
-
-      try {
-        scoring = JSON.parse(scoringRaw) as ScoringResult;
-      } catch {
-        console.error("[comparative scoring] Failed to parse scoring JSON");
-      }
-
-      if (scoring && Array.isArray(scoring.variants)) {
-        const byId = new Map<
-          string,
-          { score?: number; rank?: number; reason?: string }
-        >();
-
-        for (const item of scoring.variants) {
-          if (!item || typeof item.id !== "string") continue;
-          byId.set(item.id, {
-            score: item.score,
-            rank: item.rank,
-            reason: item.reason ? cleanText(item.reason) : undefined,
-          });
-        }
-
-        scoredVariants = baseVariants.map((v) => {
-          const scored = byId.get(v.id);
-          let score: number | undefined;
-          let reason: string | undefined;
-
-          if (
-            scored &&
-            typeof scored.score === "number" &&
-            !Number.isNaN(scored.score)
-          ) {
-            const clamped = Math.max(0, Math.min(10, scored.score));
-            score = clamped;
-          }
-
-          if (scored?.reason) {
-            reason = cleanText(scored.reason);
-          }
-
-          return {
-            ...v,
-            score,
-            reason,
-          };
-        });
-      } else {
-        // If scoring fails, fall back to baseVariants (no score differentiation)
-        scoredVariants = baseVariants;
-      }
-    } catch (scoreErr) {
-      console.error("[comparative scoring] Error:", scoreErr);
-      scoredVariants = baseVariants;
+    if (!brief) {
+      return fail("BAD_REQUEST", "Missing 'brief' in request body.");
     }
 
-    // 3️⃣ Pass 3: Cultural Intelligence (moment + flow insight) — refined tone
-    let culturalInsight: CulturalInsight | null = null;
+    // Stage D.4: require momentId for governed output.
+    // Accept body.momentId OR brief.momentId OR brief.id as a practical bridge.
+    const momentId: string | null =
+      (typeof body?.momentId === "string" && body.momentId.trim()
+        ? body.momentId.trim()
+        : null) ??
+      (typeof brief?.momentId === "string" && String(brief.momentId).trim()
+        ? String(brief.momentId).trim()
+        : null) ??
+      (typeof brief?.id === "string" && String(brief.id).trim()
+        ? String(brief.id).trim()
+        : null);
 
-    try {
-      const ciCompletion = await openai.chat.completions.create({
-        model: "gpt-4.1-mini",
-        temperature: 0.35,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a cultural strategist inside a Cultural Operations Platform. " +
-              "You do NOT sound like AI. You think like a human who understands culture, psychology and platforms. " +
-              "You write short, concrete internal notes for a creative team. " +
-              "Avoid buzzwords (like 'authentic', 'cut through the noise', 'leveraging'). " +
-              "Avoid phrases like 'as an AI', 'in today's world', 'now more than ever'. " +
-              "Avoid stylistic hyphens; only use hyphens when they are clearly part of a brand / product name. " +
-              "One or two tight sentences per field, max.",
-          },
-          {
-            role: "user",
-            content: [
-              "Here is the brief context in JSON:",
-              "",
-              userContextJson,
-              "",
-              "Here are the final scored variants in JSON:",
-              "",
-              JSON.stringify(
-                scoredVariants.map((v) => ({
-                  id: v.id,
-                  label: v.label,
-                  score: v.score ?? null,
-                  angleName: v.angleName ?? null,
-                  notes: v.notes ?? null,
-                })),
-                null,
-                2
-              ),
-              "",
-              "Based on this, return STRICT JSON with this exact shape:",
-              "{",
-              '  "culturalContext": "one short, concrete sentence about the cultural truth or tension this brief is tapping into (max ~25 words)",',
-              '  "momentInsight": "one short sentence about the current audience mindset or tension this creative is meeting (max ~25 words)",',
-              '  "flowGuidance": "one short sentence of practical guidance on how the content should feel and flow so it doesn\'t feel like AI (keep it specific, not generic advice)",',
-              '  "creativePrinciple": "one clear, punchy sentence stating the core creative principle to follow, e.g. Reveal the tension quickly, then flip it with a small, honest twist."',
-              "}",
-              "",
-              "Rules:",
-              "- Be concrete, not fluffy.",
-              "- One or two short sentences per field. Do NOT ramble.",
-              "- Do NOT use generic phrases like 'engage the audience', 'drive engagement', 'build authenticity', 'cut through the noise'.",
-              "- Do NOT include any commentary outside the JSON.",
-              "- Do NOT wrap the JSON in markdown.",
-              "- Avoid stylistic hyphens; only keep hyphens that are clearly part of brand / product names.",
-            ].join("\n"),
-          },
-        ],
-      });
-
-      const ciRaw = ciCompletion.choices[0]?.message?.content?.trim() ?? "";
-
-      try {
-        const parsed = JSON.parse(ciRaw) as CulturalInsight;
-
-        culturalInsight = {
-          culturalContext:
-            typeof parsed.culturalContext === "string"
-              ? cleanText(parsed.culturalContext)
-              : undefined,
-          momentInsight:
-            typeof parsed.momentInsight === "string"
-              ? cleanText(parsed.momentInsight)
-              : undefined,
-          flowGuidance:
-            typeof parsed.flowGuidance === "string"
-              ? cleanText(parsed.flowGuidance)
-              : undefined,
-          creativePrinciple:
-            typeof parsed.creativePrinciple === "string"
-              ? cleanText(parsed.creativePrinciple)
-              : undefined,
-        };
-      } catch {
-        console.error("[cultural intelligence] Failed to parse JSON");
-        culturalInsight = null;
-      }
-    } catch (ciErr) {
-      console.error("[cultural intelligence] Error:", ciErr);
-      culturalInsight = null;
-    }
-
-    return new Response(
-      JSON.stringify({
-        variants: scoredVariants,
-        platforms: platformList,
-        cultural: culturalInsight,
-      }),
-      { status: 200 }
-    );
-  } catch (err: any) {
-    console.error("[multi-variant generate] Error:", err);
-
-    if (err?.status === 429 || err?.code === "rate_limit_exceeded") {
-      return new Response(
-        JSON.stringify({
-          error:
-            "Rate limit reached while generating scripts. Please wait a few seconds and try again.",
-          code: "rate_limit",
-        }),
-        { status: 429 }
+    if (!momentId) {
+      return fail(
+        "BAD_REQUEST",
+        "Missing momentId. Provide body.momentId (preferred) or brief.momentId / brief.id."
       );
     }
 
-    return new Response(
-      JSON.stringify({ error: "Script generation failed" }),
-      { status: 500 }
+    const prov = getProvenanceOrFail(momentId);
+    if (!prov.ok) return prov.response;
+
+    // Stage D stability gate: require /api/signals healthy + non-empty.
+    // Use same-origin (works in Vercel).
+    const origin = buildOriginFromRequest(req);
+    const signals = await safeFetchJson(`${origin}/api/signals`);
+
+    const available = Boolean(signals?.available);
+    const items = Array.isArray(signals?.items) ? signals.items : [];
+    const sources = Array.isArray(signals?.sources) ? signals.sources : [];
+
+    if (!signals || !available) {
+      return fail(
+        "SIGNALS_UNAVAILABLE",
+        "Signals unavailable: no healthy upstream sources.",
+        { sources }
+      );
+    }
+
+    if (items.length === 0) {
+      return fail(
+        "SIGNALS_EMPTY",
+        "Signals available but empty: no usable signal items returned.",
+        { sources }
+      );
+    }
+
+    const input = buildInputFromBrief(brief, behaviour);
+
+    let engineResult: ScriptGenerationResult;
+    try {
+      engineResult = await generateAnglesAndVariantsFromBrief(input);
+    } catch (e: any) {
+      console.error("[/api/scripts/legacy] Engine error:", e);
+      return fail(
+        "ENGINE_ERROR",
+        e?.message ?? "Engine failed while generating scripts. Please try again.",
+        { sources }
+      );
+    }
+
+    try {
+      assertNoEmptyScripts(engineResult);
+    } catch (e: any) {
+      console.warn("[/api/scripts/legacy] Empty script guard hit:", e);
+      return fail(
+        "ENGINE_EMPTY_SCRIPTS",
+        e?.message ?? "Engine returned empty script content.",
+        { sources }
+      );
+    }
+
+    const okPayload: LegacyOk = {
+      ok: true,
+      deprecated: true,
+      message:
+        "Legacy route. Prefer /api/scripts/intelligence for the active Stage D pipeline. This endpoint is retained for legacy/testing only.",
+      variants: flattenVariants(engineResult),
+      cultural: engineResult.snapshot ?? null,
+      momentSignal: engineResult.momentSignal ?? null,
+      result: engineResult,
+    };
+
+    const envelope: IntelligentOutputEnvelope<LegacyOk> = {
+      provenance: prov.provenance,
+      payload: okPayload,
+    };
+
+    return NextResponse.json(
+      {
+        ...okPayload,
+        provenance: prov.provenance,
+        envelope,
+      },
+      { status: 200 }
+    );
+  } catch (err: any) {
+    console.error("[/api/scripts/legacy] Unhandled error", err);
+    return fail(
+      "ENGINE_ERROR",
+      err?.message ?? "Unexpected error while generating scripts. Please try again."
     );
   }
 }
