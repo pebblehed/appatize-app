@@ -5,7 +5,10 @@
 // Stage D.4 — Provenance Enforcement (wired)
 // Stage D.4.2 — Runtime-safe memory priming (fix)
 // Stage D.5 — Moment Lifecycle, Decay & Drift Control (wired here)
+// Stage D.6 — Decision Surfacing (ACT / WAIT / REFRESH) (wired here)
+// Stage D.6.2 — Confidence Trajectory (RISING / FLAT / DECLINING / INSUFFICIENT) (wired here)
 
+import { getAnchoredMomentId } from "@/lib/runtime/anchoredMoment";
 import { NextResponse } from "next/server";
 import { generateAnglesAndVariantsFromBrief } from "@/lib/intelligence/intelligenceEngine";
 import type {
@@ -46,6 +49,20 @@ type IntelligenceErrorCode =
   | "SIGNALS_EMPTY"
   | "ENGINE_EMPTY_SCRIPTS"
   | "ENGINE_ERROR";
+
+/**
+ * Stage D.6 — Decision semantics.
+ * These are *surface semantics* derived deterministically from lifecycle + evidence,
+ * not new intelligence.
+ */
+type DecisionState = "ACT" | "WAIT" | "REFRESH";
+
+/**
+ * Stage D.6.2 — Confidence trajectory semantics.
+ * This is UI guidance from present evidence + lifecycle,
+ * not a forecast and not a stored time-series (that comes later if desired).
+ */
+type ConfidenceTrajectory = "RISING" | "FLAT" | "DECLINING" | "INSUFFICIENT";
 
 type UiExplainBlock = {
   title?: string;
@@ -133,6 +150,101 @@ function normalizeExplainBlocks(x: unknown): UiExplainBlock[] {
 }
 
 /**
+ * Stage D.6 — Decision surfacing (guardrailed, deterministic).
+ * - REFRESH: moment not governable/usable right now (ungoverned, invalid, drift, missing canonical, signals unavailable)
+ * - WAIT: usable but thin evidence (reduces misinterpretation risk)
+ * - ACT: valid + sufficient evidence for generation now
+ */
+function deriveDecision(args: {
+  isValid: boolean;
+  lifecycleState: string;
+  invalidReason?: string | null;
+  matchedSignalsCount: number;
+  sis?: number;
+  ics?: number;
+}): {
+  decisionState: DecisionState;
+  decisionRationale: string;
+  decisionNextStep: string;
+} {
+  const lifecycle = (args.lifecycleState || "").toLowerCase();
+  const drift = args.invalidReason === "IDENTITY_DRIFT";
+
+  const refresh =
+    drift ||
+    !args.isValid ||
+    lifecycle.includes("ungoverned") ||
+    lifecycle.includes("canonical-missing") ||
+    lifecycle.includes("signals-unavailable") ||
+    lifecycle.includes("signals-empty") ||
+    lifecycle.includes("expired") ||
+    lifecycle.includes("invalid");
+
+  if (refresh) {
+    return {
+      decisionState: "REFRESH",
+      decisionRationale: drift
+        ? "This moment’s identity drifted: live signals no longer align with its governed canonical identity."
+        : "This moment is not currently valid/governed for script generation.",
+      decisionNextStep: "Refresh Live moments and select a currently governed moment.",
+    };
+  }
+
+  const thinEvidence = args.matchedSignalsCount < 2;
+  const sisBarelyPassing = typeof args.sis === "number" ? args.sis < 45 : false;
+
+  if (thinEvidence || sisBarelyPassing) {
+    return {
+      decisionState: "WAIT",
+      decisionRationale:
+        "Moment is valid, but evidence is still thin. Waiting reduces the chance of misreading a weak or early signal.",
+      decisionNextStep: "Wait for more signal confirmation, then re-check Moment Health.",
+    };
+  }
+
+  return {
+    decisionState: "ACT",
+    decisionRationale:
+      "Moment is valid and evidence binding is sufficient for generation right now.",
+    decisionNextStep: "Generate scripts now.",
+  };
+}
+
+/**
+ * Stage D.6.2 — Confidence trajectory (UI guidance).
+ * Conservative, directional, non-theatrical:
+ * - If drift/invalid: trajectory should not pretend things are rising.
+ * - If very low evidence: "INSUFFICIENT"
+ * - If borderline: "FLAT"
+ * - If strong evidence: "RISING"
+ */
+function deriveConfidenceTrajectory(args: {
+  isValid: boolean;
+  invalidReason?: string | null;
+  lifecycleState: string;
+  matchedSignalsCount: number;
+  sis?: number;
+  sisPass: number;
+}): ConfidenceTrajectory {
+  const drift = args.invalidReason === "IDENTITY_DRIFT";
+  const lifecycle = (args.lifecycleState || "").toUpperCase();
+
+  if (!args.isValid || drift || lifecycle === "EXPIRED") return "DECLINING";
+
+  // Not enough evidence to infer direction (no time series here)
+  if (args.matchedSignalsCount <= 0) return "INSUFFICIENT";
+
+  // Thin but present evidence: stable / could strengthen
+  if (args.matchedSignalsCount === 1 && (typeof args.sis !== "number" || args.sis < args.sisPass))
+    return "FLAT";
+
+  // Passing / strengthening
+  if (typeof args.sis === "number" && args.sis >= args.sisPass) return "RISING";
+
+  return "FLAT";
+}
+
+/**
  * IMPORTANT D.5/D.6 DEFENSIVE FIX:
  * Some lifecycle evaluators will treat missing timestamps as 0/NaN and immediately EXPIRE.
  * We never mutate persisted memory here; we only ensure the evaluator sees stable fields.
@@ -151,7 +263,8 @@ function ensureLifecycleTimestamps(rec: MomentMemoryRecord, createdAt?: string) 
         : qAt;
 
   const lastConf =
-    typeof (rec as any)?.lastConfirmedAt === "string" && (rec as any).lastConfirmedAt
+    typeof (rec as any)?.lastConfirmedAt === "string" &&
+    (rec as any).lastConfirmedAt
       ? (rec as any).lastConfirmedAt
       : qAt;
 
@@ -220,6 +333,12 @@ function computeSisIcs(args: {
  * D.5 FIX:
  * - Never show "evidence binding pass" if evaluator declared drift/invalid.
  * - Prefer evaluator matchedSignals if available.
+ *
+ * D.6 ADD:
+ * - Prepend a "Decision: ACT/WAIT/REFRESH" explain block to teach semantics.
+ *
+ * D.6.2 ADD:
+ * - Add a "Confidence trajectory" explain block (directional guidance).
  */
 function toUiMomentHealth(args: {
   momentId: string;
@@ -233,7 +352,8 @@ function toUiMomentHealth(args: {
 
   const evalExplain = normalizeExplainBlocks(args.evalResult?.explain);
   const evalLifecycle =
-    typeof args.evalResult?.lifecycleState === "string" && args.evalResult.lifecycleState.trim()
+    typeof args.evalResult?.lifecycleState === "string" &&
+    args.evalResult.lifecycleState.trim()
       ? args.evalResult.lifecycleState.trim()
       : undefined;
 
@@ -245,7 +365,9 @@ function toUiMomentHealth(args: {
   const stateUpper = stateRaw.toUpperCase();
 
   const invalidReason =
-    typeof args.evalResult?.invalidReason === "string" ? args.evalResult.invalidReason : null;
+    typeof args.evalResult?.invalidReason === "string"
+      ? args.evalResult.invalidReason
+      : null;
 
   const isValid =
     typeof args.evalResult?.isValid === "boolean"
@@ -300,7 +422,7 @@ function toUiMomentHealth(args: {
   const ics = typeof evalIcs === "number" ? evalIcs : computed.ics;
 
   // Explainability: keep evaluator blocks if present; otherwise build minimal truthful blocks
-  const explain: UiExplainBlock[] =
+  const explainBase: UiExplainBlock[] =
     evalExplain.length > 0
       ? evalExplain
       : [
@@ -316,9 +438,11 @@ function toUiMomentHealth(args: {
           },
         ];
 
+  const explain: UiExplainBlock[] = [...explainBase];
+
   // Ensure Evidence binding block exists (and is consistent with invalidReason)
-  const hasEvidenceBlock = explain.some(
-    (b) => (b.title || b.label || "").toLowerCase().includes("evidence")
+  const hasEvidenceBlock = explain.some((b) =>
+    (b.title || b.label || "").toLowerCase().includes("evidence")
   );
   if (!hasEvidenceBlock) {
     explain.push({
@@ -331,6 +455,43 @@ function toUiMomentHealth(args: {
             ? "Canonical binding failed: live signals no longer align with this moment’s governed identity."
             : "No live signals matched the moment’s canonical identity.",
       details: { matchedSignals: matchedSignalsCount },
+    });
+  }
+
+  // Stage D.6.2 — Confidence trajectory block (avoid duplicates)
+  const hasTrajectoryBlock = explain.some((b) =>
+    (b.title || b.label || "").toLowerCase().includes("confidence trajectory")
+  );
+
+  if (!hasTrajectoryBlock) {
+    const traj = deriveConfidenceTrajectory({
+      isValid,
+      invalidReason,
+      lifecycleState: lifecycleState || "",
+      matchedSignalsCount,
+      sis,
+      sisPass,
+    });
+
+    const hint =
+      traj === "RISING"
+        ? "Momentum looks to be strengthening — low risk of misreading the moment."
+        : traj === "DECLINING"
+          ? "Momentum looks to be weakening — increased risk of misreading the moment."
+          : traj === "INSUFFICIENT"
+            ? "Not enough matching evidence right now to infer direction."
+            : "Evidence is present but not accelerating yet.";
+
+    explain.push({
+      kind: traj === "RISING" ? "pass" : traj === "DECLINING" ? "fail" : "warn",
+      title: "Confidence trajectory",
+      message: hint,
+      details: {
+        trajectory: traj,
+        matchedSignals: matchedSignalsCount,
+        sis,
+        sisPass,
+      },
     });
   }
 
@@ -349,12 +510,40 @@ function toUiMomentHealth(args: {
     }
   }
 
+  // Stage D.6 — Decision block (prepend)
+  const decision = deriveDecision({
+    isValid,
+    lifecycleState: lifecycleState || "",
+    invalidReason,
+    matchedSignalsCount,
+    sis,
+    ics,
+  });
+
+  const decisionBlock: UiExplainBlock = {
+    kind:
+      decision.decisionState === "ACT"
+        ? "pass"
+        : decision.decisionState === "WAIT"
+          ? "warn"
+          : "fail",
+    title: `Decision: ${decision.decisionState}`,
+    message: decision.decisionRationale,
+    bullets: [decision.decisionNextStep],
+    details: { decisionState: decision.decisionState },
+  };
+
   // Provenance sources (best effort)
   const sourceList = Array.isArray(args.allSources) ? args.allSources : [];
   const sources =
     sourceList.length > 0
       ? sourceList.map((s, i) => ({
-          source: typeof s?.source === "string" ? s.source : typeof s === "string" ? s : "source",
+          source:
+            typeof s?.source === "string"
+              ? s.source
+              : typeof s === "string"
+                ? s
+                : "source",
           ts,
           id: typeof s?.id === "string" ? s.id : `src-${i + 1}`,
         }))
@@ -364,7 +553,9 @@ function toUiMomentHealth(args: {
     isValid,
     lifecycleState,
     lastEvaluatedAt:
-      typeof args.evalResult?.lastEvaluatedAt === "string" ? args.evalResult.lastEvaluatedAt : ts,
+      typeof args.evalResult?.lastEvaluatedAt === "string"
+        ? args.evalResult.lastEvaluatedAt
+        : ts,
     nextCheckpointAt:
       typeof args.evalResult?.nextCheckpointAt === "string"
         ? args.evalResult.nextCheckpointAt
@@ -372,7 +563,7 @@ function toUiMomentHealth(args: {
     thresholds: { sisPass, icsPass },
     sis,
     ics,
-    explain,
+    explain: [decisionBlock, ...explain],
     provenance: {
       sources,
       sourceNames:
@@ -408,7 +599,9 @@ function buildInputFromBrief(
     brief?.trendLabel || brief?.trend || brief?.title || "Unnamed cultural moment";
 
   const objective: string =
-    brief?.objective || brief?.goal || "Drive engagement with culturally-aware short-form content.";
+    brief?.objective ||
+    brief?.goal ||
+    "Drive engagement with culturally-aware short-form content.";
 
   const audience: string =
     brief?.audience || "People who already engage with this type of content.";
@@ -508,10 +701,58 @@ function flattenVariants(result: ScriptGenerationResult) {
 /* ------------------------------------------------------------------ */
 
 const STOPWORDS = new Set([
-  "the","a","an","and","or","of","to","in","on","for","with","by","from","as","at",
-  "is","are","was","were","be","been","being","this","that","these","those","it",
-  "its","into","over","under","about","how","why","what","when","where","your","my",
-  "we","you","i","our","their","they","them","via","new","show","hn","ask","launch",
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "of",
+  "to",
+  "in",
+  "on",
+  "for",
+  "with",
+  "by",
+  "from",
+  "as",
+  "at",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "this",
+  "that",
+  "these",
+  "those",
+  "it",
+  "its",
+  "into",
+  "over",
+  "under",
+  "about",
+  "how",
+  "why",
+  "what",
+  "when",
+  "where",
+  "your",
+  "my",
+  "we",
+  "you",
+  "i",
+  "our",
+  "their",
+  "they",
+  "them",
+  "via",
+  "new",
+  "show",
+  "hn",
+  "ask",
+  "launch",
 ]);
 
 function normalizeText(s: string): string {
@@ -595,12 +836,11 @@ function buildMomentSignalContext(args: {
 
   for (const it of args.signalItems ?? []) {
     const srcRaw = typeof it?.source === "string" ? it.source.toLowerCase() : "";
-    const source: "hackernews" | "reddit" | "fusion" =
-      srcRaw.includes("reddit")
-        ? "reddit"
-        : srcRaw.includes("hn") || srcRaw.includes("hackernews")
-          ? "hackernews"
-          : "fusion";
+    const source: "hackernews" | "reddit" | "fusion" = srcRaw.includes("reddit")
+      ? "reddit"
+      : srcRaw.includes("hn") || srcRaw.includes("hackernews")
+        ? "hackernews"
+        : "fusion";
 
     const title = typeof it?.title === "string" ? it.title : "";
     const summary = typeof it?.summary === "string" ? it.summary : "";
@@ -622,7 +862,10 @@ function buildMomentSignalContext(args: {
   return { windowLabel: args.windowLabel, signals: matched };
 }
 
-async function primeMomentMemoryFromLive(origin: string, momentId: string): Promise<boolean> {
+async function primeMomentMemoryFromLive(
+  origin: string,
+  momentId: string
+): Promise<boolean> {
   const live = await safeFetchJson(`${origin}/api/trends/live`);
   const trends = Array.isArray(live?.trends) ? live.trends : [];
 
@@ -749,55 +992,69 @@ export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
     const brief = body?.brief ?? null;
-    const behaviour: BehaviourControlsInput | undefined = body?.behaviour ?? undefined;
+    const behaviour: BehaviourControlsInput | undefined =
+      body?.behaviour ?? undefined;
 
     if (!brief) return fail("BAD_REQUEST", "Missing 'brief' in request body.");
 
     const origin = buildOriginFromRequest(req);
 
-    const momentId: string | null =
-      (typeof body?.momentId === "string" && body.momentId.trim() ? body.momentId.trim() : null) ??
-      (typeof brief?.momentId === "string" && brief.momentId.trim() ? brief.momentId.trim() : null);
+    const anchored = getAnchoredMomentId();
 
-    if (!momentId) {
-      return fail(
-        "BAD_REQUEST",
-        "Missing 'momentId'. Stage D.4 requires body.momentId (preferred) or brief.momentId. Do not use brief.id."
-      );
-    }
+const momentId: string | null =
+  (typeof body?.momentId === "string" && body.momentId.trim()
+    ? body.momentId.trim()
+    : null) ??
+  (typeof brief?.momentId === "string" && brief.momentId.trim()
+    ? brief.momentId.trim()
+    : null) ??
+  (typeof anchored?.momentId === "string" && anchored.momentId.trim()
+    ? anchored.momentId.trim()
+    : null);
+
+if (!momentId) {
+  return fail(
+    "BAD_REQUEST",
+    "Missing 'momentId'. Select a moment in Trends (this anchors it), then generate scripts.",
+    { anchoredAt: anchored?.anchoredAt ?? null }
+  );
+}
 
     const prov = await getProvenanceOrFail(momentId, origin);
     if (!prov.ok) return prov.response;
 
     const signals = await safeFetchJson(`${origin}/api/signals`);
-    const available = Boolean(signals?.available);
-    const items = Array.isArray(signals?.items) ? signals.items : [];
-    const sources = Array.isArray(signals?.sources) ? signals.sources : [];
+const items = Array.isArray((signals as any)?.items) ? (signals as any).items : [];
+const sources = Array.isArray((signals as any)?.sources) ? (signals as any).sources : [];
 
-    if (!signals || !available) {
-      return fail(
-        "SIGNALS_UNAVAILABLE",
-        "Signals unavailable: no healthy upstream sources.",
-        { sources },
+const hasHealthySource =
+  Array.isArray(sources) && sources.some((s: any) => s?.status === "ok");
+
+if (!signals || !hasHealthySource) {
+  return fail(
+    "SIGNALS_UNAVAILABLE",
+    "Signals unavailable: no healthy upstream sources.",
+    { sources },
+    {
+      isValid: false,
+      lifecycleState: "signals-unavailable",
+      lastEvaluatedAt: nowIso(),
+      thresholds: { sisPass: 40, icsPass: 60 },
+      sis: 0,
+      ics: 0,
+      explain: [
         {
-          isValid: false,
-          lifecycleState: "signals-unavailable",
-          lastEvaluatedAt: nowIso(),
-          thresholds: { sisPass: 40, icsPass: 60 },
-          sis: 0,
-          ics: 0,
-          explain: [
-            {
-              kind: "fail",
-              title: "Signals unavailable",
-              message: "No healthy upstream sources.",
-              details: { sources },
-            },
-          ],
-          provenance: { sourceNames: sources, lastSeenAt: nowIso() },
-        }
-      );
+          kind: "fail",
+          title: "Signals unavailable",
+          message: "No healthy upstream sources.",
+          details: { sources },
+        },
+      ],
+      provenance: { sourceNames: sources, lastSeenAt: nowIso() },
     }
+  );
+}
+
 
     if (items.length === 0) {
       return fail(
@@ -944,7 +1201,8 @@ export async function POST(req: Request) {
     console.error("[/api/scripts/intelligence] Unhandled error", err);
     return fail(
       "ENGINE_ERROR",
-      err?.message ?? "Unexpected error while generating script variants. Please try again."
+      err?.message ??
+        "Unexpected error while generating script variants. Please try again."
     );
   }
 }

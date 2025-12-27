@@ -70,7 +70,6 @@ const SOURCE_OPTIONS: {
   {
     id: "fusion-live",
     label: "Fusion (LIVE): HN + Reddit reinforcement",
-    // Default reddit subs inside the route are socialmedia+marketing.
     apiPath: "/api/trends/live?limit=20",
   },
   {
@@ -81,7 +80,6 @@ const SOURCE_OPTIONS: {
   {
     id: "reddit-entrepreneur",
     label: "Reddit (fallback): r/Entrepreneur only",
-    // IMPORTANT: reddit route reads `subs=`, not `subreddits=`
     apiPath: "/api/signals/reddit?subs=Entrepreneur",
   },
   {
@@ -181,6 +179,30 @@ function mapUiTrendToCoreTrend(ui: UiTrend): CoreTrend {
   };
 }
 
+/**
+ * Stage D — Active Moment anchoring.
+ *
+ * IMPORTANT FIX:
+ * Only anchor a real "momentId" when the selected source is the live governed feed.
+ * Otherwise we'd be anchoring HN trend ids / reddit signal ids, which are not momentIds.
+ */
+async function anchorMomentId(args: { trend: UiTrend; sourceId: TrendSourceId }) {
+  if (args.sourceId !== "fusion-live") return;
+
+  const momentId = typeof args.trend?.id === "string" ? args.trend.id : "";
+  if (!momentId) return;
+
+  try {
+    await fetch("/api/moment/anchor", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ momentId }),
+    });
+  } catch {
+    // Never block UX
+  }
+}
+
 export default function TrendsPage() {
   const router = useRouter();
   const { setSelectedTrend: setCoreSelectedTrend } = useTrendContext();
@@ -252,7 +274,10 @@ export default function TrendsPage() {
     };
   }, [sourceId]);
 
-  const openAngles = (trend: UiTrend) => {
+  const openAngles = async (trend: UiTrend) => {
+    // ✅ Anchor governed moment ONLY on live fusion feed (best-effort; never blocks)
+    await anchorMomentId({ trend, sourceId });
+
     // 1) Tell the engine which *core* trend is active
     const coreTrend = mapUiTrendToCoreTrend(trend);
     setCoreSelectedTrend(coreTrend);
@@ -265,7 +290,10 @@ export default function TrendsPage() {
     setSelectedTrend(null);
   };
 
-  const goToBriefsWithTrend = (trend: UiTrend) => {
+  const goToBriefsWithTrend = async (trend: UiTrend) => {
+    // ✅ Anchor governed moment ONLY on live fusion feed (best-effort; never blocks)
+    await anchorMomentId({ trend, sourceId });
+
     const params = new URLSearchParams({ trend: trend.name });
     router.push(`/briefs?${params.toString()}`);
   };
