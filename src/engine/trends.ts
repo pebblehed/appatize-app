@@ -8,6 +8,7 @@
 // No guessing, no drift. This is the canonical version.
 
 import type { Trend, TrendStatus } from "@/context/BriefContext";
+import { surfaceDecision } from "@/lib/intelligence/decisionSurfacing";
 
 /**
  * Where a signal came from.
@@ -19,7 +20,8 @@ export type SignalSource =
   | "google_trends"
   | "youtube"
   | "wikipedia"
-  | "manual";
+  | "manual"
+  | "instagram"; // used by mock signals below
 
 /**
  * Raw cultural signal from the outside world.
@@ -58,7 +60,7 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
   return trendSignals.map<Trend>((ts) => {
     const totalScore = ts.signals.reduce((sum, s) => sum + s.score, 0);
     const avgScore = ts.signals.length ? totalScore / ts.signals.length : 0;
-   
+
     const totalVolume = ts.signals.reduce((sum, s) => sum + (s.volume ?? 0), 0);
 
     // Simple classification (will evolve in Stage 3).
@@ -79,12 +81,37 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
     const allTags = ts.signals.flatMap((s) => s.tags);
 
     // Market surfacing (deterministic):
-    // We DO NOT change the moment/trend; we only expose a viewing/category hint using existing fields.
     const marketLabel = deriveMarketLabelFromTags(allTags);
-
-    // If category exists, keep it and append market only if present.
-    // If category absent, use market label if present, else leave undefined.
     const category = mergeCategoryWithMarket(ts.category, marketLabel);
+
+    // ---- Stage-3.2: Decision surfacing (deterministic) ----
+    const items = ts.signals;
+
+    const signalCount = items.length;
+
+    const sourceCount = new Set(items.map((it) => it.source).filter(Boolean)).size;
+
+    const timestamps = items
+      .map((it) => it.timestamp)
+      .filter((v) => typeof v === "string" && v.length > 0)
+      .map((iso) => Date.parse(iso))
+      .filter((ms) => Number.isFinite(ms))
+      .sort((a, b) => a - b);
+
+    const firstSeenAt =
+      timestamps.length > 0 ? new Date(timestamps[0]).toISOString() : undefined;
+
+    const lastConfirmedAt =
+      timestamps.length > 0
+        ? new Date(timestamps[timestamps.length - 1]).toISOString()
+        : undefined;
+
+    const decision = surfaceDecision({
+      signalCount,
+      sourceCount,
+      firstSeenAt,
+      lastConfirmedAt,
+    });
 
     return {
       id: ts.id,
@@ -92,22 +119,24 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
       name: ts.label,
       description: ts.description,
 
-      // FIXED: derive format from *all* signal tags, not ts.tags
+      // derive format from *all* signal tags
       formatLabel: deriveFormatLabelFromTags(allTags),
 
       momentumLabel,
       category,
 
       // Debug fields (for validating peaking/emerging logic)
-    debugScore: totalScore,
-    debugVolume: totalVolume,
+      debugScore: totalScore,
+      debugVolume: totalVolume,
+
+      // Stage-3.2 decision surface
+      ...decision,
     };
   });
 }
 
 /**
  * Lightweight format inference from tags.
- * This will get smarter as real data arrives.
  */
 function deriveFormatLabelFromTags(tags: string[]): string {
   const lower = tags.map((t) => t.toLowerCase());
@@ -128,7 +157,6 @@ function deriveFormatLabelFromTags(tags: string[]): string {
 /**
  * Deterministic market label from tags:
  * Looks for tags like "market:fragrance".
- * Returns a human label like "Market: Fragrance" or null.
  */
 function deriveMarketLabelFromTags(tags: string[]): string | null {
   const markets = new Set<string>();
@@ -143,8 +171,6 @@ function deriveMarketLabelFromTags(tags: string[]): string | null {
 
   if (markets.size === 0) return null;
 
-  // Keep output stable + readable:
-  // if multiple markets appear, show the first few deterministically.
   const list = Array.from(markets).sort();
   const pretty = list
     .slice(0, 2)
@@ -162,7 +188,6 @@ function mergeCategoryWithMarket(
 
   if (!category || category.trim().length === 0) return marketLabel;
 
-  // Avoid duplicates if category already contains "Market:"
   if (category.toLowerCase().includes("market:")) return category;
 
   return `${category} · ${marketLabel}`;
@@ -193,6 +218,7 @@ export function getMockTrendSignals(): TrendSignal[] {
         "Handheld, first-person city walk POV content with captions and inner monologue audio.",
       category: "UGC storytelling",
       signals: [
+        // Original 2
         s({
           label: "TikTok POV city walks",
           score: 78,
@@ -202,6 +228,50 @@ export function getMockTrendSignals(): TrendSignal[] {
           label: "YouTube Shorts: commute POVs",
           score: 64,
           tags: ["youtube_shorts", "short-form", "pov"],
+        }),
+
+        // Extra evidence (same moment, more density)
+        s({
+          label: "IG Reels: POV walk + captions",
+          score: 70,
+          source: "instagram",
+          tags: ["instagram", "short-form", "reels", "pov"],
+        }),
+        s({
+          label: "TikTok: 'POV: you’re in my city' template",
+          score: 82,
+          source: "manual",
+          tags: ["tiktok", "short-form", "template", "pov"],
+        }),
+        s({
+          label: "YouTube Shorts: silent walk + ambient audio",
+          score: 66,
+          source: "youtube",
+          tags: ["youtube_shorts", "short-form", "ambient", "pov"],
+        }),
+        s({
+          label: "IG Reels: 'street interview + POV cutaways'",
+          score: 74,
+          source: "instagram",
+          tags: ["instagram", "short-form", "reels", "pov", "street"],
+        }),
+        s({
+          label: "TikTok: 'night walk POV' variation",
+          score: 77,
+          source: "manual",
+          tags: ["tiktok", "short-form", "night", "pov"],
+        }),
+        s({
+          label: "YouTube: 'POV walk' compilation shorts",
+          score: 63,
+          source: "youtube",
+          tags: ["youtube_shorts", "short-form", "compilation", "pov"],
+        }),
+        s({
+          label: "IG Reels: POV + inner monologue voiceover",
+          score: 76,
+          source: "instagram",
+          tags: ["instagram", "short-form", "voiceover", "pov"],
         }),
       ],
     },
@@ -243,6 +313,7 @@ export function getMockTrendSignals(): TrendSignal[] {
         s({
           label: "IG carousel ‘expectation vs reality’",
           score: 48,
+          source: "instagram",
           tags: ["instagram", "carousel", "meme"],
         }),
       ],
