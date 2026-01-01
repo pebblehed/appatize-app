@@ -28,11 +28,11 @@ export type SignalSource =
 export interface SignalEvent {
   id: string;
   source: SignalSource;
-  label: string;        // e.g. "Street POV micro-vlogs"
-  score: number;        // simple numeric “momentum” score (0–100+)
-  volume?: number;      // optional relative volume
-  tags: string[];       // platform, format, behaviours, etc.
-  timestamp: string;    // ISO date string
+  label: string; // e.g. "Street POV micro-vlogs"
+  score: number; // simple numeric “momentum” score (0–100+)
+  volume?: number; // optional relative volume
+  tags: string[]; // platform, format, behaviours, etc.
+  timestamp: string; // ISO date string
 }
 
 /**
@@ -41,8 +41,8 @@ export interface SignalEvent {
  */
 export interface TrendSignal {
   id: string;
-  key: string;          // canonical key, e.g. "street_pov_micro_vlogs"
-  label: string;        // human-readable trend name
+  key: string; // canonical key, e.g. "street_pov_micro_vlogs"
+  label: string; // human-readable trend name
   description: string;
   signals: SignalEvent[];
   category?: string;
@@ -58,6 +58,8 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
   return trendSignals.map<Trend>((ts) => {
     const totalScore = ts.signals.reduce((sum, s) => sum + s.score, 0);
     const avgScore = ts.signals.length ? totalScore / ts.signals.length : 0;
+   
+    const totalVolume = ts.signals.reduce((sum, s) => sum + (s.volume ?? 0), 0);
 
     // Simple classification (will evolve in Stage 3).
     let status: TrendStatus;
@@ -74,6 +76,16 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
       momentumLabel = "Consistent presence • Evergreen or niche";
     }
 
+    const allTags = ts.signals.flatMap((s) => s.tags);
+
+    // Market surfacing (deterministic):
+    // We DO NOT change the moment/trend; we only expose a viewing/category hint using existing fields.
+    const marketLabel = deriveMarketLabelFromTags(allTags);
+
+    // If category exists, keep it and append market only if present.
+    // If category absent, use market label if present, else leave undefined.
+    const category = mergeCategoryWithMarket(ts.category, marketLabel);
+
     return {
       id: ts.id,
       status,
@@ -81,12 +93,14 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
       description: ts.description,
 
       // FIXED: derive format from *all* signal tags, not ts.tags
-      formatLabel: deriveFormatLabelFromTags(
-        ts.signals.flatMap((s) => s.tags)
-      ),
+      formatLabel: deriveFormatLabelFromTags(allTags),
 
       momentumLabel,
-      category: ts.category,
+      category,
+
+      // Debug fields (for validating peaking/emerging logic)
+    debugScore: totalScore,
+    debugVolume: totalVolume,
     };
   });
 }
@@ -112,14 +126,55 @@ function deriveFormatLabelFromTags(tags: string[]): string {
 }
 
 /**
+ * Deterministic market label from tags:
+ * Looks for tags like "market:fragrance".
+ * Returns a human label like "Market: Fragrance" or null.
+ */
+function deriveMarketLabelFromTags(tags: string[]): string | null {
+  const markets = new Set<string>();
+
+  for (const t of tags) {
+    const lower = (t || "").toLowerCase().trim();
+    if (!lower.startsWith("market:")) continue;
+    const raw = lower.slice("market:".length).trim();
+    if (!raw) continue;
+    markets.add(raw);
+  }
+
+  if (markets.size === 0) return null;
+
+  // Keep output stable + readable:
+  // if multiple markets appear, show the first few deterministically.
+  const list = Array.from(markets).sort();
+  const pretty = list
+    .slice(0, 2)
+    .map((m) => m.charAt(0).toUpperCase() + m.slice(1))
+    .join(" + ");
+
+  return `Market: ${pretty}`;
+}
+
+function mergeCategoryWithMarket(
+  category: string | undefined,
+  marketLabel: string | null
+): string | undefined {
+  if (!marketLabel) return category;
+
+  if (!category || category.trim().length === 0) return marketLabel;
+
+  // Avoid duplicates if category already contains "Market:"
+  if (category.toLowerCase().includes("market:")) return category;
+
+  return `${category} · ${marketLabel}`;
+}
+
+/**
  * Stage 1 mock signals — realistic shape matching the future real adapters.
  */
 export function getMockTrendSignals(): TrendSignal[] {
   const now = new Date().toISOString();
 
-  const s = (
-    overrides: Partial<SignalEvent> & { label: string }
-  ): SignalEvent => ({
+  const s = (overrides: Partial<SignalEvent> & { label: string }): SignalEvent => ({
     id: `signal-${Math.random().toString(36).slice(2)}`,
     source: "manual",
     score: 50,

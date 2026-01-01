@@ -24,6 +24,10 @@ export interface Trend {
   formatLabel: string;
   momentumLabel: string;
   category?: string;
+  
+  // Optional debug fields for validation (safe to omit in production)
+  debugScore?: number;
+  debugVolume?: number;
 }
 
 export interface Angle {
