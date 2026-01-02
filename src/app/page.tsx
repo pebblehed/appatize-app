@@ -89,7 +89,7 @@ export default function HomePage() {
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Cultural Radar</h1>
         <p className="text-sm text-neutral-400">
-          See what&apos;s moving in culture, then turn it into creator-style content in seconds.
+          A signal-backed, deterministic system that turns live cultural signals into briefs and creator-native scripts.
         </p>
       </header>
 
@@ -100,7 +100,7 @@ export default function HomePage() {
           {/* Badge (truthful) */}
           <div className="absolute right-4 top-4">
             <span className="inline-flex items-center rounded-pill border border-brand-pink/40 bg-brand-pink/10 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-brand-pink">
-              LIVE SIGNAL PREVIEW
+              Live signal preview
             </span>
           </div>
 
@@ -108,8 +108,7 @@ export default function HomePage() {
             <div className="space-y-1">
               <h2 className="text-sm font-medium text-neutral-200">Cultural Radar Snapshot</h2>
               <p className="max-w-xl text-xs text-neutral-400">
-                Pulled from live signals (Reddit for now). If the upstream is unavailable, we show an
-                honest empty state.
+                Pulled from live signals (Reddit for now). If upstream is unavailable, we show an honest empty state.
               </p>
             </div>
 
@@ -152,14 +151,12 @@ export default function HomePage() {
                       <h3 className="mb-1 text-sm font-semibold text-neutral-50">{t.name}</h3>
 
                       {t.momentumLabel && (
-                        <p className="text-[11px] text-neutral-500 mb-1">{t.momentumLabel}</p>
+                        <p className="mb-1 text-[11px] text-neutral-500">{t.momentumLabel}</p>
                       )}
 
                       <p className="mb-3 text-xs text-neutral-400">{t.description}</p>
 
-                      {t.category && (
-                        <p className="mb-3 text-[11px] text-neutral-500">{t.category}</p>
-                      )}
+                      {t.category && <p className="mb-3 text-[11px] text-neutral-500">{t.category}</p>}
 
                       <Link
                         href="/trends"
@@ -177,9 +174,7 @@ export default function HomePage() {
                     <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.16em] text-neutral-500">
                       Next step
                     </p>
-                    <h3 className="mb-1 text-sm font-semibold text-neutral-50">
-                      Open the full Trends feed
-                    </h3>
+                    <h3 className="mb-1 text-sm font-semibold text-neutral-50">Open the full Trends feed</h3>
                     <p className="mb-3 text-xs text-neutral-400">
                       Choose a pack and apply your strategy lens to narrow what you&apos;re viewing.
                     </p>
@@ -196,12 +191,12 @@ export default function HomePage() {
           </div>
         </section>
 
-        {/* Right column: MVP flow CTA (unchanged) */}
+        {/* Right column: MVP flow CTA */}
         <aside className="flex flex-col gap-3 rounded-2xl border border-shell-border bg-shell-panel p-5 md:p-6 shadow-ring-soft">
           <div className="space-y-1">
             <h2 className="text-sm font-medium text-neutral-100">Start your MVP flow</h2>
             <p className="text-xs text-neutral-400">
-              For the MVP, our goal is simple: pick a trend → generate a brief → generate a script.
+              For the MVP: pick a trend → generate a brief → generate a script.
             </p>
           </div>
 
