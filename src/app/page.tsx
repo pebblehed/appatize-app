@@ -1,4 +1,3 @@
-// src/app/page.tsx
 "use client";
 
 import Link from "next/link";
@@ -67,7 +66,7 @@ export default function HomePage() {
         } else {
           setTrends(data.trends.slice(0, DEFAULT_LIMIT));
         }
-      } catch (e) {
+      } catch {
         if (cancelled) return;
         setTrends([]);
         setError("Live radar unavailable right now.");
@@ -89,7 +88,7 @@ export default function HomePage() {
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Cultural Radar</h1>
         <p className="text-sm text-neutral-400">
-          A signal-backed, deterministic system that turns live cultural signals into briefs and creator-native scripts.
+          A signal-backed system that turns live cultural moments into briefs and creator-native scripts.
         </p>
       </header>
 
