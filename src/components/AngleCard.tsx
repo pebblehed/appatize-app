@@ -42,6 +42,11 @@ export default function AngleCard({ angle, trendName }: AngleCardProps) {
   const outcomeText = angle.outcome ? cleanText(angle.outcome) : null;
   const notesText = angle.notes ? cleanText(angle.notes) : null;
 
+  const actionHint =
+    selectedTrend && typeof selectedTrend.actionHint === "string"
+      ? selectedTrend.actionHint
+      : null;
+
   return (
     <div className="flex flex-col gap-3 rounded-xl border border-shell-border bg-shell-panel/90 p-4 shadow-ring-soft transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-pink/40 hover:shadow-brand-glow/40">
       {/* Angle label + platform/format pill row */}
@@ -59,6 +64,13 @@ export default function AngleCard({ angle, trendName }: AngleCardProps) {
               <span className="font-medium text-neutral-200">
                 {trendName}
               </span>
+            </p>
+          )}
+
+          {/* Stage 3.9 — Minimal action hint (UI-only, deterministic) */}
+          {actionHint && (
+            <p className="text-[11px] text-neutral-400">
+              {actionHint}
             </p>
           )}
         </div>

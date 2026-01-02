@@ -23,6 +23,10 @@
 // Stage 3.8 (#6) — Why this matters (deterministic, truth-only)
 // - Attach `whyThisMatters` (1–2 sentences) derived ONLY from existing evidence + decision fields.
 // - No new intelligence, no extra network calls, no LLM, no guessing.
+//
+// Stage 3.9 (#7) — Minimal action hint (deterministic, truth-only)
+// - Attach `actionHint` (one short sentence) derived ONLY from existing decision fields.
+// - No new intelligence, no extra network calls, no LLM, no marketing language.
 
 import { NextResponse } from "next/server";
 
@@ -120,11 +124,15 @@ function toIntSafe(n: unknown): number | null {
 function ensureWhyThisMatters(trend: any) {
   if (!trend || typeof trend !== "object") return trend;
 
-  if (typeof trend.whyThisMatters === "string" && trend.whyThisMatters.trim().length > 0) {
+  if (
+    typeof trend.whyThisMatters === "string" &&
+    trend.whyThisMatters.trim().length > 0
+  ) {
     return trend;
   }
 
-  const evidence = trend.evidence && typeof trend.evidence === "object" ? trend.evidence : null;
+  const evidence =
+    trend.evidence && typeof trend.evidence === "object" ? trend.evidence : null;
 
   const signalCount =
     typeof evidence?.signalCount === "number" && Number.isFinite(evidence.signalCount)
@@ -174,7 +182,9 @@ function ensureWhyThisMatters(trend: any) {
   const signalStrength =
     typeof trend.signalStrength === "string" ? trend.signalStrength.toUpperCase() : null;
   const trajectory =
-    typeof trend.confidenceTrajectory === "string" ? trend.confidenceTrajectory.toUpperCase() : null;
+    typeof trend.confidenceTrajectory === "string"
+      ? trend.confidenceTrajectory.toUpperCase()
+      : null;
 
   let sentence2: string | null = null;
 
@@ -199,6 +209,57 @@ function ensureWhyThisMatters(trend: any) {
   return {
     ...trend,
     whyThisMatters,
+  };
+}
+
+/**
+ * Stage 3.9 — Deterministic "Minimal action hint"
+ * One short UI hint sentence derived ONLY from decision fields (read-only).
+ *
+ * Rules:
+ * - Never overwrite if upstream already provides actionHint
+ * - One sentence max
+ * - No LLM
+ * - No marketing language
+ * - No behaviour steering beyond evidence (UI hint only)
+ */
+function ensureActionHint(trend: any) {
+  if (!trend || typeof trend !== "object") return trend;
+
+  if (typeof trend.actionHint === "string" && trend.actionHint.trim().length > 0) {
+    return trend;
+  }
+
+  const decisionState =
+    typeof trend.decisionState === "string" ? trend.decisionState.toUpperCase() : null;
+
+  const signalStrength =
+    typeof trend.signalStrength === "string" ? trend.signalStrength.toUpperCase() : null;
+
+  const trajectory =
+    typeof trend.confidenceTrajectory === "string"
+      ? trend.confidenceTrajectory.toUpperCase()
+      : null;
+
+  // Deterministic defaults (safe + non-persuasive)
+  let actionHint = "Track for another signal cycle.";
+
+  if (decisionState === "ACT") {
+    actionHint = "Worth turning into a brief now.";
+  } else if (decisionState === "WAIT") {
+    actionHint = "Track for another signal cycle.";
+  } else if (decisionState === "REFRESH") {
+    actionHint = "Recheck shortly for movement.";
+  } else {
+    // If decisionState is missing, fall back only to the other labels (still deterministic)
+    if (signalStrength === "WEAK" && trajectory === "WEAKENING") {
+      actionHint = "Track for another signal cycle.";
+    }
+  }
+
+  return {
+    ...trend,
+    actionHint,
   };
 }
 
@@ -231,9 +292,7 @@ export async function GET(request: Request) {
           debug: {
             pack,
             limit,
-            upstream: upstream
-              ? { source: upstream.source, status: upstream.status }
-              : null,
+            upstream: upstream ? { source: upstream.source, status: upstream.status } : null,
           },
         },
         { status: 200 }
@@ -244,7 +303,11 @@ export async function GET(request: Request) {
 
     // Attach evidence primitives (UI-only support; deterministic)
     // Then attach whyThisMatters (truth-only; deterministic)
-    const trends = rawTrends.map(ensureEvidence).map(ensureWhyThisMatters);
+    // Then attach actionHint (minimal UI hint; deterministic)
+    const trends = rawTrends
+      .map(ensureEvidence)
+      .map(ensureWhyThisMatters)
+      .map(ensureActionHint);
 
     // Return stable contract expected by UI.
     return NextResponse.json({
@@ -252,7 +315,7 @@ export async function GET(request: Request) {
       status: "ok",
       count: trends.length,
       trends,
-      // keep useful upstream telemetry for debugging but don’t change the Trend[] shape beyond evidence + whyThisMatters
+      // keep useful upstream telemetry for debugging but don’t change the Trend[] shape beyond evidence + whyThisMatters + actionHint
       debug: {
         pack,
         limit,

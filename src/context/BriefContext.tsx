@@ -41,6 +41,9 @@ export interface Trend {
   momentumLabel: string;
   category?: string;
 
+  // Stage 3.9 — minimal deterministic UI hint
+  actionHint?: string;
+
   // Stage 3.8 (#6): truth-only explanation (optional)
   whyThisMatters?: string;
 
