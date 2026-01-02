@@ -19,6 +19,12 @@ import type {
  *
  * Stage 3.8 (#6):
  * - Renders `whyThisMatters` (truth-only) if provided by /api/trends/live
+ *
+ * Stage 3.9 (#7):
+ * - Receives + can carry `actionHint` (one short deterministic sentence)
+ *
+ * Stage #8:
+ * - Save / pin moment (by id) via TrendContext (localStorage-backed)
  */
 
 /**
@@ -53,6 +59,9 @@ type UiTrend = {
   // Stage 3.8: truth-only, deterministic explanation from API
   whyThisMatters?: string;
 
+  // Stage 3.9: minimal deterministic UI hint from API
+  actionHint?: string;
+
   // Engagement debug (already used in your UI)
   debugScore?: number;
   debugVolume?: number;
@@ -81,6 +90,9 @@ type ApiTrend = {
 
   // Stage 3.8
   whyThisMatters?: string;
+
+  // Stage 3.9
+  actionHint?: string;
 
   // Engagement debug
   debugScore?: number;
@@ -366,6 +378,7 @@ function mapApiTrendToUiTrend(api: ApiTrend): UiTrend {
     exampleHook: deriveExampleHook(api),
 
     whyThisMatters: api.whyThisMatters,
+    actionHint: api.actionHint,
 
     debugScore: api.debugScore,
     debugVolume: api.debugVolume,
@@ -404,6 +417,9 @@ function mapUiTrendToCoreTrend(ui: UiTrend): CoreTrend {
     formatLabel: ui.category,
     momentumLabel: ui.movementLabel,
     category: ui.category,
+
+    // Stage 3.9 (optional): carry through for downstream UI
+    actionHint: ui.actionHint,
   };
 }
 
@@ -505,7 +521,11 @@ function trajectoryTooltip(t: UiTrend) {
 
 export default function TrendsPage() {
   const router = useRouter();
-  const { setSelectedTrend: setCoreSelectedTrend } = useTrendContext();
+  const {
+    setSelectedTrend: setCoreSelectedTrend,
+    isPinned,
+    togglePin,
+  } = useTrendContext();
 
   // Live-only default (no mock option)
   const [sourceId, setSourceId] = useState<TrendSourceId>("reddit-fragrance");
@@ -676,6 +696,7 @@ export default function TrendsPage() {
           <section className="grid gap-4 md:grid-cols-2">
             {filteredTrends.map((trend) => {
               const isEvidenceOpen = expandedEvidenceId === trend.id;
+              const saved = isPinned(trend.id);
 
               return (
                 <article
@@ -702,6 +723,20 @@ export default function TrendsPage() {
                         <span className="rounded-pill bg-black/40 px-2 py-0.5 text-[10px] text-neutral-300">
                           {trend.category}
                         </span>
+
+                        {/* Stage #8 — Save / pin moment */}
+                        <button
+                          type="button"
+                          onClick={() => togglePin(trend.id)}
+                          className={`inline-flex items-center gap-1 rounded-pill border px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                            saved
+                              ? "border-brand-pink/50 bg-brand-pink/15 text-brand-pink hover:bg-brand-pink/20"
+                              : "border-shell-border bg-black/20 text-neutral-200 hover:border-brand-pink/40 hover:bg-black/40"
+                          }`}
+                          title={saved ? "Saved (click to unsave)" : "Save this moment"}
+                        >
+                          {saved ? "Saved" : "Save"} <span aria-hidden>📌</span>
+                        </button>
 
                         {/* Evidence toggle (Stage 3.4) */}
                         <button
@@ -735,6 +770,14 @@ export default function TrendsPage() {
                         {trend.confidenceTrajectory ?? "—"}
                       </span>
                     </div>
+
+                    {/* Stage 3.9: Minimal action hint (truth-only) */}
+                    {trend.actionHint && trend.actionHint.trim().length > 0 && (
+                      <p className="text-[11px] text-neutral-400">
+                        <span className="text-neutral-500">Next:</span>{" "}
+                        <span className="text-neutral-200">{trend.actionHint}</span>
+                      </p>
+                    )}
 
                     <p className="text-xs text-neutral-300">{trend.description}</p>
 
