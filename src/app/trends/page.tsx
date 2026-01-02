@@ -11,10 +11,27 @@ import type {
 } from "@/context/BriefContext";
 
 /**
+ * TrendsPage (Stage 3.4)
+ * - Adds read-only evidence surfacing (decision + deterministic evidence primitives)
+ * - Adds safe tooltips via `title` attributes (no new deps)
+ * - Keeps all existing flow intact (source select, lens, angles modal, turn into brief)
+ */
+
+/**
  * UI trend status used for styling/labels on this page.
  * We map backend statuses (Emerging/Peaking/Stable/…) into these.
  */
 type TrendStatus = "emerging" | "peaking" | "stable" | "declining";
+
+type Evidence = {
+  signalCount: number;
+  sourceCount: number;
+  firstSeenAt?: string;
+  lastConfirmedAt?: string;
+  ageHours?: number;
+  recencyMins?: number;
+  velocityPerHour?: number;
+};
 
 type UiTrend = {
   id: string;
@@ -34,15 +51,7 @@ type UiTrend = {
   confidenceTrajectory?: "ACCELERATING" | "STABLE" | "WEAKENING" | "VOLATILE";
   signalStrength?: "WEAK" | "MODERATE" | "STRONG";
   decisionRationale?: string;
-  evidence?: {
-    signalCount: number;
-    sourceCount: number;
-    firstSeenAt?: string;
-    lastConfirmedAt?: string;
-    ageHours?: number;
-    recencyMins?: number;
-    velocityPerHour?: number;
-  };
+  evidence?: Evidence;
 };
 
 /**
@@ -68,15 +77,7 @@ type ApiTrend = {
   confidenceTrajectory?: "ACCELERATING" | "STABLE" | "WEAKENING" | "VOLATILE";
   signalStrength?: "WEAK" | "MODERATE" | "STRONG";
   decisionRationale?: string;
-  evidence?: {
-    signalCount: number;
-    sourceCount: number;
-    firstSeenAt?: string;
-    lastConfirmedAt?: string;
-    ageHours?: number;
-    recencyMins?: number;
-    velocityPerHour?: number;
-  };
+  evidence?: Evidence;
 };
 
 type TrendsApiResponse = {
@@ -97,7 +98,11 @@ const SOURCE_OPTIONS: {
   apiPath: string;
 }[] = [
   { id: "mock-stage-1", label: "Stage 1 mock engine", apiPath: "/api/trends/mock" },
-  { id: "reddit-social", label: "Reddit: Social / Marketing", apiPath: "/api/signals/reddit?subs=socialmedia,marketing" },
+  {
+    id: "reddit-social",
+    label: "Reddit: Social / Marketing",
+    apiPath: "/api/signals/reddit?subs=socialmedia,marketing",
+  },
   { id: "reddit-fragrance", label: "Reddit: Fragrance", apiPath: "/api/signals/reddit?pack=fragrance" },
   { id: "reddit-beauty", label: "Reddit: Beauty / Skincare", apiPath: "/api/signals/reddit?pack=beauty" },
   { id: "reddit-fitness", label: "Reddit: Fitness / Wellness", apiPath: "/api/signals/reddit?pack=fitness" },
@@ -211,6 +216,7 @@ function mapApiTrendToUiTrend(api: ApiTrend): UiTrend {
     category,
     exampleHook: deriveExampleHook(api),
 
+    // Engagement debug passthrough
     debugScore: api.debugScore,
     debugVolume: api.debugVolume,
 
@@ -263,6 +269,7 @@ function matchesStrategyLens(trend: UiTrend, lens: StrategyLensId) {
   const keywords = LENS_KEYWORDS[lens] || [];
   if (keywords.some((k) => haystack.includes(normalize(k)))) return true;
 
+  // Also allow direct category contains (in case category is "Work-life" etc later)
   const cat = normalize(trend.category);
   if (cat.includes(lens)) return true;
 
@@ -271,16 +278,46 @@ function matchesStrategyLens(trend: UiTrend, lens: StrategyLensId) {
 
 function formatRecency(recencyMins?: number) {
   if (recencyMins == null) return "—";
-  if (recencyMins < 60) return `${recencyMins}m ago`;
-  const hrs = Math.round(recencyMins / 60);
+  const mins = Math.round(recencyMins);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.round(mins / 60);
   return `${hrs}h ago`;
 }
 
 function formatAge(ageHours?: number) {
   if (ageHours == null) return "—";
   if (ageHours < 24) return `${ageHours.toFixed(1)}h`;
-  const days = (ageHours / 24);
+  const days = ageHours / 24;
   return `${days.toFixed(1)}d`;
+}
+
+function formatVelocity(v?: number) {
+  if (v == null) return "—";
+  // Keep stable + readable, avoid noisy decimals.
+  const rounded = Math.round(v * 10) / 10;
+  return `${rounded}/h`;
+}
+
+function tooltipForDecision(trend: UiTrend): string {
+  // Stage 3.4 tooltips must be read-only and honest.
+  const bits: string[] = [];
+
+  if (trend.decisionState) bits.push(`Decision: ${trend.decisionState}`);
+  if (trend.signalStrength) bits.push(`Strength: ${trend.signalStrength}`);
+  if (trend.confidenceTrajectory) bits.push(`Trajectory: ${trend.confidenceTrajectory}`);
+
+  const e = trend.evidence;
+  if (e) {
+    bits.push(`Density (signals): ${e.signalCount}`);
+    bits.push(`Breadth (sources): ${e.sourceCount}`);
+    if (e.recencyMins != null) bits.push(`Freshness: ${formatRecency(e.recencyMins)}`);
+    if (e.ageHours != null) bits.push(`Age: ${formatAge(e.ageHours)}`);
+    if (e.velocityPerHour != null) bits.push(`Velocity: ${formatVelocity(e.velocityPerHour)}`);
+  }
+
+  if (trend.decisionRationale) bits.push(`Rationale: ${trend.decisionRationale}`);
+
+  return bits.length > 0 ? bits.join(" • ") : "No evidence available for this trend yet.";
 }
 
 export default function TrendsPage() {
@@ -299,6 +336,7 @@ export default function TrendsPage() {
   // Evidence panel expanded state (per trend id)
   const [expandedEvidenceId, setExpandedEvidenceId] = useState<string | null>(null);
 
+  // Fetch trends whenever the source changes
   useEffect(() => {
     let cancelled = false;
 
@@ -314,6 +352,7 @@ export default function TrendsPage() {
           setError("Invalid trend source selected.");
           setTrends([]);
           setLoading(false);
+          setExpandedEvidenceId(null);
         }
         return;
       }
@@ -357,8 +396,11 @@ export default function TrendsPage() {
   }, [trends, strategyLens]);
 
   const openAngles = (trend: UiTrend) => {
+    // 1) Tell the engine which *core* trend is active
     const coreTrend = mapUiTrendToCoreTrend(trend);
     setCoreSelectedTrend(coreTrend);
+
+    // 2) Open the modal with the UI trend
     setSelectedTrend(trend);
   };
 
@@ -378,6 +420,7 @@ export default function TrendsPage() {
   return (
     <>
       <div className="space-y-6">
+        {/* Header */}
         <header className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">Trends</h1>
           <p className="text-sm text-neutral-400">
@@ -386,6 +429,7 @@ export default function TrendsPage() {
           </p>
         </header>
 
+        {/* Helper bar: step + selectors + back link */}
         <div className="flex flex-wrap items-center justify-between gap-3 text-[11px] text-neutral-400">
           <p>Step 1 in the flow: pick a trend → turn it into a brief → generate scripts.</p>
 
@@ -395,6 +439,7 @@ export default function TrendsPage() {
               value={sourceId}
               onChange={(e) => setSourceId(e.target.value as TrendSourceId)}
               className="rounded-pill border border-shell-border bg-black/40 px-3 py-1 text-[11px] text-neutral-200 focus:outline-none focus:ring-1 focus:ring-brand-pink/60"
+              title="Pick which signal source powers the Trends list."
             >
               {SOURCE_OPTIONS.map((src) => (
                 <option key={src.id} value={src.id}>
@@ -408,6 +453,7 @@ export default function TrendsPage() {
               value={strategyLens}
               onChange={(e) => setStrategyLens(e.target.value as StrategyLensId)}
               className="rounded-pill border border-shell-border bg-black/40 px-3 py-1 text-[11px] text-neutral-200 focus:outline-none focus:ring-1 focus:ring-brand-pink/60"
+              title="Filters what you’re viewing — it does not change the moment."
             >
               {STRATEGY_LENS_OPTIONS.map((opt) => (
                 <option key={opt.id} value={opt.id}>
@@ -423,12 +469,14 @@ export default function TrendsPage() {
             <Link
               href="/"
               className="inline-flex items-center gap-1 rounded-pill border border-shell-border bg-black/20 px-3 py-1 font-medium text-neutral-200 transition-colors hover:border-brand-pink/40 hover:bg-black/40"
+              title="Return to the main radar page."
             >
               Back to Cultural Radar
             </Link>
           </div>
         </div>
 
+        {/* Loading / error states */}
         {loading && (
           <div className="rounded-2xl border border-shell-border bg-shell-panel/80 p-4 text-xs text-neutral-400">
             Loading trends…
@@ -441,10 +489,12 @@ export default function TrendsPage() {
           </div>
         )}
 
+        {/* Trends grid */}
         {!loading && !error && filteredTrends.length > 0 && (
           <section className="grid gap-4 md:grid-cols-2">
             {filteredTrends.map((trend) => {
               const isEvidenceOpen = expandedEvidenceId === trend.id;
+              const decisionTooltip = tooltipForDecision(trend);
 
               return (
                 <article
@@ -458,6 +508,7 @@ export default function TrendsPage() {
                           className={`mb-1 text-[11px] font-medium uppercase tracking-[0.16em] ${statusClass(
                             trend.status
                           )}`}
+                          title="Stage label derived from current scoring/heuristics (not a value judgment)."
                         >
                           {statusLabel(trend.status)}
                         </p>
@@ -468,7 +519,10 @@ export default function TrendsPage() {
                       </div>
 
                       <div className="flex items-center gap-2">
-                        <span className="rounded-pill bg-black/40 px-2 py-0.5 text-[10px] text-neutral-300">
+                        <span
+                          className="rounded-pill bg-black/40 px-2 py-0.5 text-[10px] text-neutral-300"
+                          title="Category is a viewing hint — not a change to the underlying moment."
+                        >
                           {trend.category}
                         </span>
 
@@ -477,7 +531,7 @@ export default function TrendsPage() {
                           type="button"
                           onClick={() => toggleEvidence(trend.id)}
                           className="inline-flex items-center gap-1 rounded-pill border border-shell-border bg-black/20 px-2 py-0.5 text-[10px] text-neutral-200 transition-colors hover:border-brand-pink/40 hover:bg-black/40"
-                          title="Show deterministic evidence (no AI guessing)"
+                          title={decisionTooltip}
                         >
                           Evidence {isEvidenceOpen ? "▴" : "▾"}
                         </button>
@@ -487,63 +541,65 @@ export default function TrendsPage() {
                     <p className="text-xs text-neutral-300">{trend.description}</p>
 
                     {(trend.debugScore != null || trend.debugVolume != null) && (
-                      <p className="text-[11px] text-neutral-500">
+                      <p
+                        className="text-[11px] text-neutral-500"
+                        title="Debug engagement aggregates coming from signals (best-effort)."
+                      >
                         Engagement: ups={trend.debugScore ?? "—"} • comments={trend.debugVolume ?? "—"}
                       </p>
                     )}
 
                     {/* Stage 3.4 Evidence Panel (read-only, optional) */}
                     {isEvidenceOpen && (
-                      <div className="rounded-xl border border-shell-border bg-black/20 p-3 text-[11px] text-neutral-300">
+                      <div
+                        className="rounded-xl border border-shell-border bg-black/20 p-3 text-[11px] text-neutral-300"
+                        title="This panel is read-only. It surfaces deterministic evidence primitives and guardrailed decision labels."
+                      >
                         <div className="flex flex-wrap gap-x-6 gap-y-2">
-                          <div>
+                          <div title="ACT / WAIT / REFRESH (guardrailed; never ACT with WEAK or WEAKENING).">
                             <span className="text-neutral-500">Decision:</span>{" "}
                             <span className="text-neutral-100">{trend.decisionState ?? "—"}</span>
                           </div>
-                          <div>
+
+                          <div title="ACCELERATING / STABLE / WEAKENING / VOLATILE (timestamp + count heuristics).">
                             <span className="text-neutral-500">Trajectory:</span>{" "}
                             <span className="text-neutral-100">{trend.confidenceTrajectory ?? "—"}</span>
                           </div>
-                          <div>
+
+                          <div title="WEAK / MODERATE / STRONG (density + breadth + freshness heuristics).">
                             <span className="text-neutral-500">Strength:</span>{" "}
                             <span className="text-neutral-100">{trend.signalStrength ?? "—"}</span>
                           </div>
-                          <div>
+
+                          <div title="Signal count (density proxy).">
                             <span className="text-neutral-500">Density:</span>{" "}
-                            <span className="text-neutral-100">
-                              {trend.evidence?.signalCount ?? "—"}
-                            </span>
+                            <span className="text-neutral-100">{trend.evidence?.signalCount ?? "—"}</span>
                           </div>
-                          <div>
+
+                          <div title="Distinct sources (breadth proxy).">
                             <span className="text-neutral-500">Breadth:</span>{" "}
-                            <span className="text-neutral-100">
-                              {trend.evidence?.sourceCount ?? "—"}
-                            </span>
+                            <span className="text-neutral-100">{trend.evidence?.sourceCount ?? "—"}</span>
                           </div>
-                          <div>
+
+                          <div title="How recently the moment was confirmed (derived from lastConfirmedAt).">
                             <span className="text-neutral-500">Freshness:</span>{" "}
-                            <span className="text-neutral-100">
-                              {formatRecency(trend.evidence?.recencyMins)}
-                            </span>
+                            <span className="text-neutral-100">{formatRecency(trend.evidence?.recencyMins)}</span>
                           </div>
-                          <div>
+
+                          <div title="How long the moment has been around (derived from firstSeenAt).">
                             <span className="text-neutral-500">Age:</span>{" "}
-                            <span className="text-neutral-100">
-                              {formatAge(trend.evidence?.ageHours)}
-                            </span>
+                            <span className="text-neutral-100">{formatAge(trend.evidence?.ageHours)}</span>
                           </div>
-                          <div>
+
+                          <div title="Velocity proxy (signals per hour; deterministic).">
                             <span className="text-neutral-500">Velocity:</span>{" "}
-                            <span className="text-neutral-100">
-                              {trend.evidence?.velocityPerHour != null ? `${trend.evidence.velocityPerHour}/h` : "—"}
-                            </span>
+                            <span className="text-neutral-100">{formatVelocity(trend.evidence?.velocityPerHour)}</span>
                           </div>
                         </div>
 
                         {trend.decisionRationale && (
-                          <p className="mt-2 text-neutral-400">
-                            <span className="text-neutral-500">Rationale:</span>{" "}
-                            {trend.decisionRationale}
+                          <p className="mt-2 text-neutral-400" title="Short explanation of why the decision label was chosen.">
+                            <span className="text-neutral-500">Rationale:</span> {trend.decisionRationale}
                           </p>
                         )}
                       </div>
@@ -564,16 +620,18 @@ export default function TrendsPage() {
                         type="button"
                         onClick={() => openAngles(trend)}
                         className="inline-flex items-center gap-1 rounded-pill border border-shell-border bg-black/20 px-3 py-1 text-[11px] font-medium text-neutral-200 transition-colors hover:border-brand-pink/40 hover:bg-black/40"
+                        title="Open angles for this trend (does not change the moment)."
                       >
                         View angles
                       </button>
+
                       <button
                         type="button"
                         onClick={() => goToBriefsWithTrend(trend)}
                         className="inline-flex items-center gap-1 rounded-pill bg-brand-pink px-3 py-1 text-[11px] font-semibold text-black transition-colors hover:bg-brand-pink-soft"
+                        title="Create a brief seeded with this trend."
                       >
-                        Turn into brief
-                        <span className="text-xs">↗</span>
+                        Turn into brief <span className="text-xs">↗</span>
                       </button>
                     </div>
                   </div>
@@ -590,6 +648,7 @@ export default function TrendsPage() {
         )}
       </div>
 
+      {/* Angles modal */}
       {selectedTrend && <FullAnglesModal trend={selectedTrend} onClose={closeAngles} />}
     </>
   );

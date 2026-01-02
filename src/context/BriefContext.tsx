@@ -16,6 +16,23 @@ import React, {
 
 export type TrendStatus = "Emerging" | "Peaking" | "Stable";
 
+// Stage 3.4: Decision & evidence surfacing types (optional fields only)
+export type DecisionState = "ACT" | "WAIT" | "REFRESH";
+export type ConfidenceTrajectory = "ACCELERATING" | "STABLE" | "WEAKENING" | "VOLATILE";
+export type SignalStrength = "WEAK" | "MODERATE" | "STRONG";
+
+export interface TrendEvidence {
+  signalCount: number;
+  sourceCount: number;
+  firstSeenAt?: string;
+  lastConfirmedAt?: string;
+
+  // Optional derived values (only if you choose to add later)
+  ageHours?: number;
+  recencyMins?: number;
+  velocityPerHour?: number;
+}
+
 export interface Trend {
   id: string;
   status: TrendStatus;
@@ -29,28 +46,12 @@ export interface Trend {
   debugScore?: number;
   debugVolume?: number;
 
-  // ----------------------------
-  // Stage 3.4 — Evidence Surfacing (optional, read-only)
-  // These fields are SAFE to omit. They must never be required by UI.
-  // ----------------------------
-  decisionState?: "ACT" | "WAIT" | "REFRESH";
-  confidenceTrajectory?: "ACCELERATING" | "STABLE" | "WEAKENING" | "VOLATILE";
-  signalStrength?: "WEAK" | "MODERATE" | "STRONG";
+  // Stage 3.4 (optional, read-only, safe to omit)
+  decisionState?: DecisionState;
+  confidenceTrajectory?: ConfidenceTrajectory;
+  signalStrength?: SignalStrength;
   decisionRationale?: string;
-
-  evidence?: {
-    signalCount: number;
-    sourceCount: number;
-
-    // ISO timestamps (if available)
-    firstSeenAt?: string;
-    lastConfirmedAt?: string;
-
-    // Derived metrics (deterministic)
-    ageHours?: number; // hours since firstSeenAt
-    recencyMins?: number; // minutes since lastConfirmedAt
-    velocityPerHour?: number; // signalCount / ageHours (guarded)
-  };
+  evidence?: TrendEvidence;
 }
 
 export interface Angle {
