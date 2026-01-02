@@ -2,10 +2,11 @@
 //
 // Stage D.6 — Decision Surfacing (enforced)
 // Stage 3.2 — Confidence Trajectory (deterministic)
+// Stage 3.4 — Evidence Surfacing (read-only)
 //
-// Purpose (Stage 3.2):
-// - Surface a *movement* label for each moment: ACCELERATING / STABLE / WEAKENING / VOLATILE
-// - Do this using ONLY deterministic evidence (timestamps + counts).
+// Purpose:
+// - Surface decisionState / confidenceTrajectory / signalStrength conservatively.
+// - Stage 3.4 adds evidence primitives + derived metrics for explainability.
 // - No semantic interpretation. No “AI guessing.”
 //
 // Hard rules:
@@ -13,33 +14,25 @@
 // - Never allow ACT with WEAK
 // - Never allow ACT with WEAKENING
 // - Enforce compatibility table conservatively (downgrade only)
-//
-// Notes:
-// - We do NOT have full time-series per moment (yet), so “trajectory” is inferred from:
-//   - age (firstSeenAt -> now)
-//   - recency (lastConfirmedAt -> now)
-//   - density proxy (signalCount, sourceCount)
-// - This is explainable and stable, but intentionally conservative.
 
 import type {
   DecisionSurface,
   DecisionState,
   ConfidenceTrajectory,
   SignalStrength,
+  EvidenceSurface,
 } from "./decisionTypes";
 
 type Inputs = {
   signalCount: number;
   sourceCount: number;
 
-  // ISO timestamps if available (from your memory / qualification)
+  // ISO timestamps if available
   firstSeenAt?: string;
   lastConfirmedAt?: string;
 
-  // Optional quality score if you already have it in your pipeline (keep deterministic usage)
+  // Optional future hook (not used for trajectory/scoring in Stage 3.x)
   qualityScore?: number;
-
-  // Optional: free-form evidence notes from upstream (NOT used for trajectory in Stage 3.2)
   evidenceText?: string;
 };
 
@@ -62,12 +55,6 @@ function hoursBetween(aMs: number, bMs: number): number {
 
 /**
  * Stage 3.2 — Confidence Trajectory (deterministic)
- *
- * Heuristics (conservative):
- * - ACCELERATING: confirmed very recently AND (newish OR high density)
- * - WEAKENING: not confirmed in a long time relative to age
- * - VOLATILE: older moment with intermittent confirmations + density spike proxy
- * - STABLE: default
  */
 function deriveConfidenceTrajectory(nowMs: number, inputs: Inputs): ConfidenceTrajectory {
   const signalCount = clampInt(inputs.signalCount ?? 0, 0, 10_000);
@@ -79,15 +66,10 @@ function deriveConfidenceTrajectory(nowMs: number, inputs: Inputs): ConfidenceTr
   // If we lack timestamps, be honest + conservative.
   if (!firstSeenMs && !lastConfirmedMs) return "STABLE";
 
-  const ageHours =
-    firstSeenMs != null ? hoursBetween(nowMs, firstSeenMs) : null;
-
-  const recencyMins =
-    lastConfirmedMs != null ? minutesBetween(nowMs, lastConfirmedMs) : null;
+  const ageHours = firstSeenMs != null ? hoursBetween(nowMs, firstSeenMs) : null;
+  const recencyMins = lastConfirmedMs != null ? minutesBetween(nowMs, lastConfirmedMs) : null;
 
   // ---- ACCELERATING ----
-  // Very recent confirmation + meaningful density.
-  // (We require some density so we don’t “accelerate” on a single ping.)
   const veryRecent = recencyMins != null && recencyMins <= 90; // 1.5h
   const recent = recencyMins != null && recencyMins <= 240; // 4h
 
@@ -98,12 +80,13 @@ function deriveConfidenceTrajectory(nowMs: number, inputs: Inputs): ConfidenceTr
 
   const newish = ageHours != null && ageHours <= 24;
 
-  if ((veryRecent && dense) || (recent && dense && newish)) {
+  // IMPORTANT (Stage 3.4 caution):
+  // Prevent “ACCELERATING” on ultra-thin evidence (e.g., 1-2 items that are just very new).
+  if ((veryRecent && dense && signalCount >= 3) || (recent && dense && newish && signalCount >= 3)) {
     return "ACCELERATING";
   }
 
   // ---- WEAKENING ----
-  // Not confirmed for a long time, especially if the moment is not brand new.
   const staleConfirm = recencyMins != null && recencyMins >= 24 * 60; // 24h+
   const notNew = ageHours != null && ageHours >= 36; // 1.5 days+
 
@@ -112,10 +95,6 @@ function deriveConfidenceTrajectory(nowMs: number, inputs: Inputs): ConfidenceTr
   }
 
   // ---- VOLATILE ----
-  // We don’t have time-series, so “volatile” means:
-  // - moment has been around a while
-  // - confirmations are not very recent but not fully stale
-  // - density is high enough to suggest spiky attention
   const older = ageHours != null && ageHours >= 48; // 2 days+
   const midRecency =
     recencyMins != null && recencyMins > 240 && recencyMins < 24 * 60; // 4h..24h
@@ -129,7 +108,6 @@ function deriveConfidenceTrajectory(nowMs: number, inputs: Inputs): ConfidenceTr
 
 /**
  * Signal strength (kept deterministic).
- * This is used to guard decisions.
  */
 function deriveSignalStrength(nowMs: number, inputs: Inputs): SignalStrength {
   const signalCount = clampInt(inputs.signalCount ?? 0, 0, 10_000);
@@ -141,10 +119,6 @@ function deriveSignalStrength(nowMs: number, inputs: Inputs): SignalStrength {
   const veryRecent = recencyMins != null && recencyMins <= 180; // 3h
   const recent = recencyMins != null && recencyMins <= 24 * 60; // 24h
 
-  // Conservative scoring:
-  // - STRONG requires breadth or high density + recency
-  // - MODERATE is mid density/breadth + at least recent
-  // - WEAK otherwise
   const strong =
     (veryRecent && (sourceCount >= 3 && signalCount >= 7)) ||
     (veryRecent && signalCount >= 14) ||
@@ -164,7 +138,6 @@ function deriveSignalStrength(nowMs: number, inputs: Inputs): SignalStrength {
 
 /**
  * Compatibility enforcement (downgrade-only).
- * We never “upgrade” beyond what evidence allows.
  */
 function enforceDecisionCompatibility(
   decision: DecisionState,
@@ -179,22 +152,14 @@ function enforceDecisionCompatibility(
     if (decision === "ACT") return "WAIT";
   }
 
-  // Compatibility table (conservative):
-  // WEAK -> WAIT
   if (strength === "WEAK") return "WAIT";
 
-  // MODERATE:
-  // - ACCELERATING can be REFRESH (not ACT)
-  // - others remain WAIT/REFRESH
   if (strength === "MODERATE") {
     if (decision === "ACT") return "REFRESH";
     if (trajectory !== "ACCELERATING" && decision === "REFRESH") return "WAIT";
     return decision;
   }
 
-  // STRONG:
-  // - ACT allowed only if ACCELERATING
-  // - VOLATILE should be REFRESH
   if (strength === "STRONG") {
     if (trajectory === "VOLATILE" && decision === "ACT") return "REFRESH";
     if (trajectory !== "ACCELERATING" && decision === "ACT") return "REFRESH";
@@ -205,8 +170,41 @@ function enforceDecisionCompatibility(
 }
 
 /**
+ * Stage 3.4 — Evidence surfacing (read-only)
+ * Produces stable primitives and guarded derived metrics.
+ */
+function deriveEvidence(nowMs: number, inputs: Inputs): EvidenceSurface {
+  const signalCount = clampInt(inputs.signalCount ?? 0, 0, 10_000);
+  const sourceCount = clampInt(inputs.sourceCount ?? 0, 0, 1_000);
+
+  const firstSeenMs = safeDateMs(inputs.firstSeenAt);
+  const lastConfirmedMs = safeDateMs(inputs.lastConfirmedAt);
+
+  const ageHours =
+    firstSeenMs != null ? hoursBetween(nowMs, firstSeenMs) : undefined;
+
+  const recencyMins =
+    lastConfirmedMs != null ? minutesBetween(nowMs, lastConfirmedMs) : undefined;
+
+  // Guarded velocity: if ageHours is extremely small or missing, omit.
+  const velocityPerHour =
+    ageHours != null && ageHours >= 0.25 // at least 15 minutes old to avoid crazy spikes
+      ? Number((signalCount / ageHours).toFixed(2))
+      : undefined;
+
+  return {
+    signalCount,
+    sourceCount,
+    firstSeenAt: inputs.firstSeenAt,
+    lastConfirmedAt: inputs.lastConfirmedAt,
+    ageHours: ageHours != null ? Number(ageHours.toFixed(2)) : undefined,
+    recencyMins: recencyMins != null ? Math.round(recencyMins) : undefined,
+    velocityPerHour,
+  };
+}
+
+/**
  * Main surfacing function (never throws).
- * Keeps contract stable.
  */
 export function surfaceDecision(inputs: Inputs): DecisionSurface {
   try {
@@ -216,15 +214,12 @@ export function surfaceDecision(inputs: Inputs): DecisionSurface {
     const signalStrength = deriveSignalStrength(nowMs, inputs);
 
     // Base decision (conservative default).
-    // If your pipeline already sets a preliminary decision upstream,
-    // pass it in via inputs later — but for now we stay safe.
     let decisionState: DecisionState = "REFRESH";
     let decisionRationale = "Re-check recommended to confirm convergence and momentum.";
 
-    // Conservative defaults based on evidence (still deterministic)
     if (signalStrength === "WEAK") {
       decisionState = "WAIT";
-      decisionRationale = "Insufficient signal density/breadth to act confidently right now.";
+      decisionRationale = "Insufficient evidence (freshness/velocity/breadth) to act confidently right now.";
     } else if (confidenceTrajectory === "WEAKENING") {
       decisionState = "WAIT";
       decisionRationale = "Signals appear to be weakening; wait for renewed confirmation.";
@@ -241,10 +236,9 @@ export function surfaceDecision(inputs: Inputs): DecisionSurface {
 
     decisionState = enforceDecisionCompatibility(decisionState, signalStrength, confidenceTrajectory);
 
-    // If compatibility downgraded, keep rationale honest.
     if (decisionState === "WAIT" && signalStrength !== "WEAK" && confidenceTrajectory !== "WEAKENING") {
-      // This can happen from compatibility rules (e.g. MODERATE + STABLE).
-      decisionRationale = "Not enough evidence for action timing yet; wait for stronger acceleration or breadth.";
+      decisionRationale =
+        "Not enough evidence for action timing yet; wait for stronger acceleration or breadth.";
     }
     if (decisionState === "REFRESH" && signalStrength === "MODERATE" && confidenceTrajectory !== "ACCELERATING") {
       decisionRationale = "Moderate signal without acceleration; refresh later to confirm direction.";
@@ -255,14 +249,20 @@ export function surfaceDecision(inputs: Inputs): DecisionSurface {
       confidenceTrajectory,
       signalStrength,
       decisionRationale,
+
+      // Stage 3.4: evidence surface (read-only)
+      evidence: deriveEvidence(nowMs, inputs),
     };
   } catch {
-    // Never-500 / never-throw fallback
     return {
       decisionState: "WAIT",
       confidenceTrajectory: "STABLE",
       signalStrength: "WEAK",
       decisionRationale: "Unable to confidently evaluate evidence; defaulting to safe WAIT.",
+      evidence: {
+        signalCount: 0,
+        sourceCount: 0,
+      },
     };
   }
 }

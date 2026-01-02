@@ -24,10 +24,33 @@ export interface Trend {
   formatLabel: string;
   momentumLabel: string;
   category?: string;
-  
+
   // Optional debug fields for validation (safe to omit in production)
   debugScore?: number;
   debugVolume?: number;
+
+  // ----------------------------
+  // Stage 3.4 — Evidence Surfacing (optional, read-only)
+  // These fields are SAFE to omit. They must never be required by UI.
+  // ----------------------------
+  decisionState?: "ACT" | "WAIT" | "REFRESH";
+  confidenceTrajectory?: "ACCELERATING" | "STABLE" | "WEAKENING" | "VOLATILE";
+  signalStrength?: "WEAK" | "MODERATE" | "STRONG";
+  decisionRationale?: string;
+
+  evidence?: {
+    signalCount: number;
+    sourceCount: number;
+
+    // ISO timestamps (if available)
+    firstSeenAt?: string;
+    lastConfirmedAt?: string;
+
+    // Derived metrics (deterministic)
+    ageHours?: number; // hours since firstSeenAt
+    recencyMins?: number; // minutes since lastConfirmedAt
+    velocityPerHour?: number; // signalCount / ageHours (guarded)
+  };
 }
 
 export interface Angle {

@@ -25,15 +25,30 @@ type UiTrend = {
   category: string;
   exampleHook: string;
 
-   // ✅ add these
+  // Engagement debug (already used in your UI)
   debugScore?: number;
   debugVolume?: number;
+
+  // Stage 3.4: evidence surfacing (optional)
+  decisionState?: "ACT" | "WAIT" | "REFRESH";
+  confidenceTrajectory?: "ACCELERATING" | "STABLE" | "WEAKENING" | "VOLATILE";
+  signalStrength?: "WEAK" | "MODERATE" | "STRONG";
+  decisionRationale?: string;
+  evidence?: {
+    signalCount: number;
+    sourceCount: number;
+    firstSeenAt?: string;
+    lastConfirmedAt?: string;
+    ageHours?: number;
+    recencyMins?: number;
+    velocityPerHour?: number;
+  };
 };
 
 /**
  * API response shapes – works with:
  * - /api/trends/mock
- * - /api/signals/reddit?subreddits=...
+ * - /api/signals/reddit?...
  */
 type ApiTrend = {
   id: string;
@@ -43,10 +58,25 @@ type ApiTrend = {
   formatLabel?: string;
   momentumLabel?: string;
   category?: string;
-// ✅ add these (they’ll just be undefined for mock engine)
+
+  // Engagement debug
   debugScore?: number;
   debugVolume?: number;
 
+  // Stage 3.4 decision + evidence (optional)
+  decisionState?: "ACT" | "WAIT" | "REFRESH";
+  confidenceTrajectory?: "ACCELERATING" | "STABLE" | "WEAKENING" | "VOLATILE";
+  signalStrength?: "WEAK" | "MODERATE" | "STRONG";
+  decisionRationale?: string;
+  evidence?: {
+    signalCount: number;
+    sourceCount: number;
+    firstSeenAt?: string;
+    lastConfirmedAt?: string;
+    ageHours?: number;
+    recencyMins?: number;
+    velocityPerHour?: number;
+  };
 };
 
 type TrendsApiResponse = {
@@ -66,31 +96,11 @@ const SOURCE_OPTIONS: {
   label: string;
   apiPath: string;
 }[] = [
-  {
-    id: "mock-stage-1",
-    label: "Stage 1 mock engine",
-    apiPath: "/api/trends/mock",
-  },
-  {
-    id: "reddit-social",
-    label: "Reddit: Social / Marketing",
-    apiPath: "/api/signals/reddit?subs=socialmedia,marketing",
-  },
-  {
-    id: "reddit-fragrance",
-    label: "Reddit: Fragrance",
-    apiPath: "/api/signals/reddit?pack=fragrance",
-  },
-  {
-    id: "reddit-beauty",
-    label: "Reddit: Beauty / Skincare",
-    apiPath: "/api/signals/reddit?pack=beauty",
-  },
-  {
-    id: "reddit-fitness",
-    label: "Reddit: Fitness / Wellness",
-    apiPath: "/api/signals/reddit?pack=fitness",
-  },
+  { id: "mock-stage-1", label: "Stage 1 mock engine", apiPath: "/api/trends/mock" },
+  { id: "reddit-social", label: "Reddit: Social / Marketing", apiPath: "/api/signals/reddit?subs=socialmedia,marketing" },
+  { id: "reddit-fragrance", label: "Reddit: Fragrance", apiPath: "/api/signals/reddit?pack=fragrance" },
+  { id: "reddit-beauty", label: "Reddit: Beauty / Skincare", apiPath: "/api/signals/reddit?pack=beauty" },
+  { id: "reddit-fitness", label: "Reddit: Fitness / Wellness", apiPath: "/api/signals/reddit?pack=fitness" },
 ];
 
 /**
@@ -130,135 +140,17 @@ const STRATEGY_LENS_OPTIONS: { id: StrategyLensId; label: string }[] = [
 
 const LENS_KEYWORDS: Record<StrategyLensId, string[]> = {
   all: [],
-  fragrance: [
-    "fragrance",
-    "perfume",
-    "parfum",
-    "eau de",
-    "scent",
-    "cologne",
-    "notes",
-    "oud",
-    "amber",
-    "vanilla",
-    "musk",
-  ],
-  beauty: [
-    "beauty",
-    "skincare",
-    "skin care",
-    "makeup",
-    "cosmetic",
-    "foundation",
-    "serum",
-    "spf",
-    "retinol",
-    "acne",
-    "glow",
-  ],
-  fashion: [
-    "fashion",
-    "outfit",
-    "style",
-    "streetwear",
-    "runway",
-    "wardrobe",
-    "clothing",
-    "trend",
-    "aesthetic",
-  ],
-  fitness: [
-    "fitness",
-    "workout",
-    "gym",
-    "running",
-    "strength",
-    "protein",
-    "wellness",
-    "health",
-    "sleep",
-    "nutrition",
-  ],
-  food: [
-    "food",
-    "drink",
-    "recipe",
-    "cooking",
-    "restaurant",
-    "coffee",
-    "tea",
-    "cocktail",
-    "wine",
-    "beer",
-  ],
-  travel: [
-    "travel",
-    "trip",
-    "holiday",
-    "vacation",
-    "city break",
-    "hotel",
-    "airbnb",
-    "itinerary",
-    "tour",
-    "flight",
-  ],
-  tech: [
-    "tech",
-    "ai",
-    "app",
-    "software",
-    "device",
-    "gadget",
-    "startup",
-    "open source",
-    "product",
-  ],
-  finance: [
-    "finance",
-    "invest",
-    "stocks",
-    "crypto",
-    "bitcoin",
-    "trading",
-    "savings",
-    "interest rates",
-    "inflation",
-  ],
-  gaming: [
-    "gaming",
-    "game",
-    "xbox",
-    "playstation",
-    "nintendo",
-    "steam",
-    "esports",
-    "streaming",
-  ],
-  creator: [
-    "creator",
-    "ugc",
-    "tiktok",
-    "reels",
-    "shorts",
-    "content",
-    "influencer",
-    "editing",
-    "storytelling",
-    "vlog",
-  ],
-  b2b: [
-    "b2b",
-    "saas",
-    "enterprise",
-    "sales",
-    "marketing",
-    "pipeline",
-    "crm",
-    "lead",
-    "productivity",
-    "teams",
-  ],
+  fragrance: ["fragrance", "perfume", "parfum", "eau de", "scent", "cologne", "notes", "oud", "amber", "vanilla", "musk"],
+  beauty: ["beauty", "skincare", "skin care", "makeup", "cosmetic", "foundation", "serum", "spf", "retinol", "acne", "glow"],
+  fashion: ["fashion", "outfit", "style", "streetwear", "runway", "wardrobe", "clothing", "trend", "aesthetic"],
+  fitness: ["fitness", "workout", "gym", "running", "strength", "protein", "wellness", "health", "sleep", "nutrition"],
+  food: ["food", "drink", "recipe", "cooking", "restaurant", "coffee", "tea", "cocktail", "wine", "beer"],
+  travel: ["travel", "trip", "holiday", "vacation", "city break", "hotel", "airbnb", "itinerary", "tour", "flight"],
+  tech: ["tech", "ai", "app", "software", "device", "gadget", "startup", "open source", "product"],
+  finance: ["finance", "invest", "stocks", "crypto", "bitcoin", "trading", "savings", "interest rates", "inflation"],
+  gaming: ["gaming", "game", "xbox", "playstation", "nintendo", "steam", "esports", "streaming"],
+  creator: ["creator", "ugc", "tiktok", "reels", "shorts", "content", "influencer", "editing", "storytelling", "vlog"],
+  b2b: ["b2b", "saas", "enterprise", "sales", "marketing", "pipeline", "crm", "lead", "productivity", "teams"],
 };
 
 function statusClass(status: TrendStatus) {
@@ -319,10 +211,15 @@ function mapApiTrendToUiTrend(api: ApiTrend): UiTrend {
     category,
     exampleHook: deriveExampleHook(api),
 
-// ✅ pass through
     debugScore: api.debugScore,
     debugVolume: api.debugVolume,
 
+    // Stage 3.4 passthrough (optional)
+    decisionState: api.decisionState,
+    confidenceTrajectory: api.confidenceTrajectory,
+    signalStrength: api.signalStrength,
+    decisionRationale: api.decisionRationale,
+    evidence: api.evidence,
   };
 }
 
@@ -336,7 +233,6 @@ function mapUiStatusToCoreStatus(status: TrendStatus): CoreTrendStatus {
       return "Emerging";
     case "peaking":
       return "Peaking";
-    // For now, treat stable/declining as Stable
     case "stable":
     case "declining":
     default:
@@ -364,15 +260,27 @@ function matchesStrategyLens(trend: UiTrend, lens: StrategyLensId) {
   if (lens === "all") return true;
 
   const haystack = normalize(`${trend.category} ${trend.name} ${trend.description}`);
-
   const keywords = LENS_KEYWORDS[lens] || [];
   if (keywords.some((k) => haystack.includes(normalize(k)))) return true;
 
-  // Also allow direct category contains (in case category is "Work-life" etc later)
   const cat = normalize(trend.category);
   if (cat.includes(lens)) return true;
 
   return false;
+}
+
+function formatRecency(recencyMins?: number) {
+  if (recencyMins == null) return "—";
+  if (recencyMins < 60) return `${recencyMins}m ago`;
+  const hrs = Math.round(recencyMins / 60);
+  return `${hrs}h ago`;
+}
+
+function formatAge(ageHours?: number) {
+  if (ageHours == null) return "—";
+  if (ageHours < 24) return `${ageHours.toFixed(1)}h`;
+  const days = (ageHours / 24);
+  return `${days.toFixed(1)}d`;
 }
 
 export default function TrendsPage() {
@@ -388,7 +296,9 @@ export default function TrendsPage() {
 
   const [selectedTrend, setSelectedTrend] = useState<UiTrend | null>(null);
 
-  // Fetch trends whenever the source changes
+  // Evidence panel expanded state (per trend id)
+  const [expandedEvidenceId, setExpandedEvidenceId] = useState<string | null>(null);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -419,12 +329,14 @@ export default function TrendsPage() {
 
         if (!cancelled) {
           setTrends(uiTrends);
+          setExpandedEvidenceId(null); // reset when source changes
         }
       } catch (err) {
         console.error("[TrendsPage] fetch error:", err);
         if (!cancelled) {
           setError("Unable to load trends from this source right now.");
           setTrends([]);
+          setExpandedEvidenceId(null);
         }
       } finally {
         if (!cancelled) {
@@ -445,11 +357,8 @@ export default function TrendsPage() {
   }, [trends, strategyLens]);
 
   const openAngles = (trend: UiTrend) => {
-    // 1) Tell the engine which *core* trend is active
     const coreTrend = mapUiTrendToCoreTrend(trend);
     setCoreSelectedTrend(coreTrend);
-
-    // 2) Open the modal with the UI trend
     setSelectedTrend(trend);
   };
 
@@ -462,27 +371,23 @@ export default function TrendsPage() {
     router.push(`/briefs?${params.toString()}`);
   };
 
+  const toggleEvidence = (id: string) => {
+    setExpandedEvidenceId((prev) => (prev === id ? null : id));
+  };
+
   return (
     <>
       <div className="space-y-6">
-        {/* Header */}
         <header className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">Trends</h1>
           <p className="text-sm text-neutral-400">
-            Appatize&apos;s cultural radar. Powered by interpreted trends from the mock
-            engine and live Reddit topics, in the same shape we&apos;ll use for future
-            signals.
-            
+            Appatize&apos;s cultural radar. Powered by interpreted trends from the mock engine
+            and live Reddit topics, in the same shape we&apos;ll use for future signals.
           </p>
         </header>
 
-        
-
-        {/* Helper bar: step + selectors + back link */}
         <div className="flex flex-wrap items-center justify-between gap-3 text-[11px] text-neutral-400">
-          <p>
-            Step 1 in the flow: pick a trend → turn it into a brief → generate scripts.
-          </p>
+          <p>Step 1 in the flow: pick a trend → turn it into a brief → generate scripts.</p>
 
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-neutral-500">Source:</span>
@@ -524,7 +429,6 @@ export default function TrendsPage() {
           </div>
         </div>
 
-        {/* Loading / error states */}
         {loading && (
           <div className="rounded-2xl border border-shell-border bg-shell-panel/80 p-4 text-xs text-neutral-400">
             Loading trends…
@@ -537,75 +441,145 @@ export default function TrendsPage() {
           </div>
         )}
 
-        {/* Trends grid */}
         {!loading && !error && filteredTrends.length > 0 && (
           <section className="grid gap-4 md:grid-cols-2">
-            {filteredTrends.map((trend) => (
-              <article
-                key={trend.id}
-                className="flex flex-col justify-between gap-3 rounded-2xl border border-shell-border bg-shell-panel/90 p-4 shadow-ring-soft transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-pink/40 hover:shadow-brand-glow/40"
-              >
-                <div className="space-y-2">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="space-y-1">
-                      <p
-                        className={`mb-1 text-[11px] font-medium uppercase tracking-[0.16em] ${statusClass(
-                          trend.status
-                        )}`}
-                      >
-                        {statusLabel(trend.status)}
-                      </p>
-                      <h2 className="text-sm font-semibold text-neutral-50">{trend.name}</h2>
-                      {trend.movementLabel && (
-                        <p className="text-[11px] text-neutral-500">{trend.movementLabel}</p>
-                      )}
+            {filteredTrends.map((trend) => {
+              const isEvidenceOpen = expandedEvidenceId === trend.id;
+
+              return (
+                <article
+                  key={trend.id}
+                  className="flex flex-col justify-between gap-3 rounded-2xl border border-shell-border bg-shell-panel/90 p-4 shadow-ring-soft transition-all duration-200 hover:-translate-y-0.5 hover:border-brand-pink/40 hover:shadow-brand-glow/40"
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <p
+                          className={`mb-1 text-[11px] font-medium uppercase tracking-[0.16em] ${statusClass(
+                            trend.status
+                          )}`}
+                        >
+                          {statusLabel(trend.status)}
+                        </p>
+                        <h2 className="text-sm font-semibold text-neutral-50">{trend.name}</h2>
+                        {trend.movementLabel && (
+                          <p className="text-[11px] text-neutral-500">{trend.movementLabel}</p>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="rounded-pill bg-black/40 px-2 py-0.5 text-[10px] text-neutral-300">
+                          {trend.category}
+                        </span>
+
+                        {/* Evidence toggle (Stage 3.4) */}
+                        <button
+                          type="button"
+                          onClick={() => toggleEvidence(trend.id)}
+                          className="inline-flex items-center gap-1 rounded-pill border border-shell-border bg-black/20 px-2 py-0.5 text-[10px] text-neutral-200 transition-colors hover:border-brand-pink/40 hover:bg-black/40"
+                          title="Show deterministic evidence (no AI guessing)"
+                        >
+                          Evidence {isEvidenceOpen ? "▴" : "▾"}
+                        </button>
+                      </div>
                     </div>
-                    <span className="rounded-pill bg-black/40 px-2 py-0.5 text-[10px] text-neutral-300">
-                      {trend.category}
-                    </span>
+
+                    <p className="text-xs text-neutral-300">{trend.description}</p>
+
+                    {(trend.debugScore != null || trend.debugVolume != null) && (
+                      <p className="text-[11px] text-neutral-500">
+                        Engagement: ups={trend.debugScore ?? "—"} • comments={trend.debugVolume ?? "—"}
+                      </p>
+                    )}
+
+                    {/* Stage 3.4 Evidence Panel (read-only, optional) */}
+                    {isEvidenceOpen && (
+                      <div className="rounded-xl border border-shell-border bg-black/20 p-3 text-[11px] text-neutral-300">
+                        <div className="flex flex-wrap gap-x-6 gap-y-2">
+                          <div>
+                            <span className="text-neutral-500">Decision:</span>{" "}
+                            <span className="text-neutral-100">{trend.decisionState ?? "—"}</span>
+                          </div>
+                          <div>
+                            <span className="text-neutral-500">Trajectory:</span>{" "}
+                            <span className="text-neutral-100">{trend.confidenceTrajectory ?? "—"}</span>
+                          </div>
+                          <div>
+                            <span className="text-neutral-500">Strength:</span>{" "}
+                            <span className="text-neutral-100">{trend.signalStrength ?? "—"}</span>
+                          </div>
+                          <div>
+                            <span className="text-neutral-500">Density:</span>{" "}
+                            <span className="text-neutral-100">
+                              {trend.evidence?.signalCount ?? "—"}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-neutral-500">Breadth:</span>{" "}
+                            <span className="text-neutral-100">
+                              {trend.evidence?.sourceCount ?? "—"}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-neutral-500">Freshness:</span>{" "}
+                            <span className="text-neutral-100">
+                              {formatRecency(trend.evidence?.recencyMins)}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-neutral-500">Age:</span>{" "}
+                            <span className="text-neutral-100">
+                              {formatAge(trend.evidence?.ageHours)}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-neutral-500">Velocity:</span>{" "}
+                            <span className="text-neutral-100">
+                              {trend.evidence?.velocityPerHour != null ? `${trend.evidence.velocityPerHour}/h` : "—"}
+                            </span>
+                          </div>
+                        </div>
+
+                        {trend.decisionRationale && (
+                          <p className="mt-2 text-neutral-400">
+                            <span className="text-neutral-500">Rationale:</span>{" "}
+                            {trend.decisionRationale}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    <p className="text-[11px] text-neutral-400">
+                      Example hook: <span className="text-neutral-200">{trend.exampleHook}</span>
+                    </p>
                   </div>
 
-                  <p className="text-xs text-neutral-300">{trend.description}</p>
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                    <div className="text-[11px] text-neutral-500">
+                      Step into this trend with Appatize to generate creator-native angles and scripts.
+                    </div>
 
-                  {(trend.debugScore != null || trend.debugVolume != null) && (
-                  <p className="text-[11px] text-neutral-500">
-                  Debug: ups={trend.debugScore ?? "—"} • comments={trend.debugVolume ?? "—"}
-                 </p>
-                )}
-
-
-                  <p className="text-[11px] text-neutral-400">
-                    Example hook:{" "}
-                    <span className="text-neutral-200">{trend.exampleHook}</span>
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                  <div className="text-[11px] text-neutral-500">
-                    Step into this trend with Appatize to generate creator-native angles and
-                    scripts.
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => openAngles(trend)}
+                        className="inline-flex items-center gap-1 rounded-pill border border-shell-border bg-black/20 px-3 py-1 text-[11px] font-medium text-neutral-200 transition-colors hover:border-brand-pink/40 hover:bg-black/40"
+                      >
+                        View angles
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => goToBriefsWithTrend(trend)}
+                        className="inline-flex items-center gap-1 rounded-pill bg-brand-pink px-3 py-1 text-[11px] font-semibold text-black transition-colors hover:bg-brand-pink-soft"
+                      >
+                        Turn into brief
+                        <span className="text-xs">↗</span>
+                      </button>
+                    </div>
                   </div>
-
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => openAngles(trend)}
-                      className="inline-flex items-center gap-1 rounded-pill border border-shell-border bg-black/20 px-3 py-1 text-[11px] font-medium text-neutral-200 transition-colors hover:border-brand-pink/40 hover:bg-black/40"
-                    >
-                      View angles
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => goToBriefsWithTrend(trend)}
-                      className="inline-flex items-center gap-1 rounded-pill bg-brand-pink px-3 py-1 text-[11px] font-semibold text-black transition-colors hover:bg-brand-pink-soft"
-                    >
-                      Turn into brief
-                      <span className="text-xs">↗</span>
-                    </button>
-                  </div>
-                </div>
-              </article>
-            ))}
+                </article>
+              );
+            })}
           </section>
         )}
 
@@ -616,7 +590,6 @@ export default function TrendsPage() {
         )}
       </div>
 
-      {/* Angles modal */}
       {selectedTrend && <FullAnglesModal trend={selectedTrend} onClose={closeAngles} />}
     </>
   );
