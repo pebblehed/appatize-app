@@ -28,7 +28,7 @@ export default function RootLayout({
                 {/* Top shell header */}
                 <header className="flex items-center justify-between border-b border-shell-border px-8 py-4">
                   <div className="text-xs font-medium tracking-[0.24em] text-neutral-400">
-                    APPATIZE · CULTURAL INTELLIGENCE ENGINE
+                     CULTURAL INTELLIGENCE ENGINE
                   </div>
                   <div className="text-[11px] text-neutral-500">
                     Where brands meet the moment

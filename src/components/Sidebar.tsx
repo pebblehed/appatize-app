@@ -22,7 +22,7 @@ export default function Sidebar() {
         <div className="h-7 w-7 rounded-full bg-gradient-to-br from-brand-pink via-brand-amber to-brand-pink shadow-brand-glow" />
         <div className="flex flex-col">
           <span className="text-xs font-semibold tracking-wide">
-            Appatize
+            
           </span>
           <span className="text-[10px] uppercase tracking-[0.16em] text-neutral-400">
             Trend · Brief · Script

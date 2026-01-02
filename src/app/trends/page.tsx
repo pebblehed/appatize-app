@@ -15,7 +15,7 @@ import type {
  * TrendsPage (Stage 3.5)
  * - Adds decision chips (Decision / Strength / Trajectory) for fast scanning
  * - Keeps Stage 3.4 evidence drawer + tooltips (read-only, deterministic)
- * - No engine changes, no new deps, no behavioural changes
+ * - UI now uses LIVE trends only (no mock sources in the build path)
  */
 
 /**
@@ -61,8 +61,8 @@ type UiTrend = {
 
 /**
  * API response shapes – works with:
- * - /api/trends/mock
- * - /api/signals/reddit?...
+ * - /api/trends/live?pack=... (preferred)
+ * - /api/signals/reddit?... (still compatible if needed)
  */
 type ApiTrend = {
   id: string;
@@ -87,41 +87,47 @@ type ApiTrend = {
 
 type TrendsApiResponse = {
   source?: string;
+  status?: string;
   trends: ApiTrend[];
 };
 
 type TrendSourceId =
-  | "mock-stage-1"
   | "reddit-social"
   | "reddit-fragrance"
   | "reddit-beauty"
+  | "reddit-fashion"
   | "reddit-fitness";
+
 
 const SOURCE_OPTIONS: {
   id: TrendSourceId;
   label: string;
   apiPath: string;
 }[] = [
-  { id: "mock-stage-1", label: "Stage 1 mock engine", apiPath: "/api/trends/mock" },
   {
     id: "reddit-social",
     label: "Reddit: Social / Marketing",
-    apiPath: "/api/signals/reddit?subs=socialmedia,marketing",
+    apiPath: "/api/trends/live?pack=social",
   },
   {
     id: "reddit-fragrance",
     label: "Reddit: Fragrance",
-    apiPath: "/api/signals/reddit?pack=fragrance",
+    apiPath: "/api/trends/live?pack=fragrance",
   },
   {
     id: "reddit-beauty",
     label: "Reddit: Beauty / Skincare",
-    apiPath: "/api/signals/reddit?pack=beauty",
+    apiPath: "/api/trends/live?pack=beauty",
+  },
+  {
+    id: "reddit-fashion",
+    label: "Reddit: Fashion",
+    apiPath: "/api/trends/live?pack=fashion",
   },
   {
     id: "reddit-fitness",
     label: "Reddit: Fitness / Wellness",
-    apiPath: "/api/signals/reddit?pack=fitness",
+    apiPath: "/api/trends/live?pack=fitness",
   },
 ];
 
@@ -211,7 +217,18 @@ const LENS_KEYWORDS: Record<StrategyLensId, string[]> = {
     "sleep",
     "nutrition",
   ],
-  food: ["food", "drink", "recipe", "cooking", "restaurant", "coffee", "tea", "cocktail", "wine", "beer"],
+  food: [
+    "food",
+    "drink",
+    "recipe",
+    "cooking",
+    "restaurant",
+    "coffee",
+    "tea",
+    "cocktail",
+    "wine",
+    "beer",
+  ],
   travel: [
     "travel",
     "trip",
@@ -224,11 +241,62 @@ const LENS_KEYWORDS: Record<StrategyLensId, string[]> = {
     "tour",
     "flight",
   ],
-  tech: ["tech", "ai", "app", "software", "device", "gadget", "startup", "open source", "product"],
-  finance: ["finance", "invest", "stocks", "crypto", "bitcoin", "trading", "savings", "interest rates", "inflation"],
-  gaming: ["gaming", "game", "xbox", "playstation", "nintendo", "steam", "esports", "streaming"],
-  creator: ["creator", "ugc", "tiktok", "reels", "shorts", "content", "influencer", "editing", "storytelling", "vlog"],
-  b2b: ["b2b", "saas", "enterprise", "sales", "marketing", "pipeline", "crm", "lead", "productivity", "teams"],
+  tech: [
+    "tech",
+    "ai",
+    "app",
+    "software",
+    "device",
+    "gadget",
+    "startup",
+    "open source",
+    "product",
+  ],
+  finance: [
+    "finance",
+    "invest",
+    "stocks",
+    "crypto",
+    "bitcoin",
+    "trading",
+    "savings",
+    "interest rates",
+    "inflation",
+  ],
+  gaming: [
+    "gaming",
+    "game",
+    "xbox",
+    "playstation",
+    "nintendo",
+    "steam",
+    "esports",
+    "streaming",
+  ],
+  creator: [
+    "creator",
+    "ugc",
+    "tiktok",
+    "reels",
+    "shorts",
+    "content",
+    "influencer",
+    "editing",
+    "storytelling",
+    "vlog",
+  ],
+  b2b: [
+    "b2b",
+    "saas",
+    "enterprise",
+    "sales",
+    "marketing",
+    "pipeline",
+    "crm",
+    "lead",
+    "productivity",
+    "teams",
+  ],
 };
 
 function statusClass(status: TrendStatus) {
@@ -429,7 +497,8 @@ export default function TrendsPage() {
   const router = useRouter();
   const { setSelectedTrend: setCoreSelectedTrend } = useTrendContext();
 
-  const [sourceId, setSourceId] = useState<TrendSourceId>("mock-stage-1");
+  // Live-only default (no mock option)
+  const [sourceId, setSourceId] = useState<TrendSourceId>("reddit-fragrance");
   const [strategyLens, setStrategyLens] = useState<StrategyLensId>("all");
 
   const [trends, setTrends] = useState<UiTrend[]>([]);
@@ -468,6 +537,8 @@ export default function TrendsPage() {
         }
 
         const data = (await res.json()) as TrendsApiResponse;
+
+        // If live is temporarily unavailable, we show empty (never swap in mock).
         const uiTrends = (data.trends || []).map(mapApiTrendToUiTrend);
 
         if (!cancelled) {
@@ -477,7 +548,7 @@ export default function TrendsPage() {
       } catch (err) {
         console.error("[TrendsPage] fetch error:", err);
         if (!cancelled) {
-          setError("Unable to load trends from this source right now.");
+          setError("Unable to load live trends right now.");
           setTrends([]);
           setExpandedEvidenceId(null);
         }
@@ -528,8 +599,8 @@ export default function TrendsPage() {
         <header className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">Trends</h1>
           <p className="text-sm text-neutral-400">
-            Appatize&apos;s cultural radar. Powered by interpreted trends from the mock engine and live
-            Reddit topics, in the same shape we&apos;ll use for future signals.
+            Appatize&apos;s cultural radar. Live signal-backed topics (Reddit for now), shaped into a stable Trend[]
+            contract for briefs and script generation.
           </p>
         </header>
 
@@ -636,10 +707,7 @@ export default function TrendsPage() {
 
                     {/* Stage 3.5: Decision chips row (read-only) */}
                     <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                      <span
-                        className={chipClassForDecision(trend.decisionState)}
-                        title={decisionTooltip(trend)}
-                      >
+                      <span className={chipClassForDecision(trend.decisionState)} title={decisionTooltip(trend)}>
                         {trend.decisionState ?? "—"}
                       </span>
 
@@ -676,9 +744,7 @@ export default function TrendsPage() {
                           </div>
                           <div>
                             <span className="text-neutral-500">Trajectory:</span>{" "}
-                            <span className="text-neutral-100">
-                              {trend.confidenceTrajectory ?? "—"}
-                            </span>
+                            <span className="text-neutral-100">{trend.confidenceTrajectory ?? "—"}</span>
                           </div>
                           <div>
                             <span className="text-neutral-500">Strength:</span>{" "}
@@ -686,21 +752,15 @@ export default function TrendsPage() {
                           </div>
                           <div>
                             <span className="text-neutral-500">Density:</span>{" "}
-                            <span className="text-neutral-100">
-                              {trend.evidence?.signalCount ?? "—"}
-                            </span>
+                            <span className="text-neutral-100">{trend.evidence?.signalCount ?? "—"}</span>
                           </div>
                           <div>
                             <span className="text-neutral-500">Breadth:</span>{" "}
-                            <span className="text-neutral-100">
-                              {trend.evidence?.sourceCount ?? "—"}
-                            </span>
+                            <span className="text-neutral-100">{trend.evidence?.sourceCount ?? "—"}</span>
                           </div>
                           <div>
                             <span className="text-neutral-500">Freshness:</span>{" "}
-                            <span className="text-neutral-100">
-                              {formatRecency(trend.evidence?.recencyMins)}
-                            </span>
+                            <span className="text-neutral-100">{formatRecency(trend.evidence?.recencyMins)}</span>
                           </div>
                           <div>
                             <span className="text-neutral-500">Age:</span>{" "}
@@ -709,17 +769,14 @@ export default function TrendsPage() {
                           <div>
                             <span className="text-neutral-500">Velocity:</span>{" "}
                             <span className="text-neutral-100">
-                              {trend.evidence?.velocityPerHour != null
-                                ? `${trend.evidence.velocityPerHour}/h`
-                                : "—"}
+                              {trend.evidence?.velocityPerHour != null ? `${trend.evidence.velocityPerHour}/h` : "—"}
                             </span>
                           </div>
                         </div>
 
                         {trend.decisionRationale && (
                           <p className="mt-2 text-neutral-400">
-                            <span className="text-neutral-500">Rationale:</span>{" "}
-                            {trend.decisionRationale}
+                            <span className="text-neutral-500">Rationale:</span> {trend.decisionRationale}
                           </p>
                         )}
                       </div>

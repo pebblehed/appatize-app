@@ -13,6 +13,10 @@
 // - Safe empty states
 // - Backwards compatible params to prevent drift
 //
+// Anti-throttle hardening (deterministic, no fake intelligence):
+// - Short TTL cache per (pack/subreddits + limit) to reduce Reddit hits
+// - Lightweight User-Agent jitter to reduce fingerprint throttling
+//
 // Telemetry (best-effort, deterministic):
 // - We probe each subreddit once to report raw counts + availability.
 // - We then call the engine to apply hygiene + mapping.
@@ -31,6 +35,9 @@ const DEFAULT_SUBREDDITS = ["socialmedia", "marketing"];
  * Curated subreddit packs (discovery lenses).
  * Deterministic input selection only — not intelligence.
  */
+
+
+
 const PACKS: Record<string, string[]> = {
   // Core defaults
   social: ["socialmedia", "marketing"],
@@ -38,7 +45,48 @@ const PACKS: Record<string, string[]> = {
 
   // Market packs
   fragrance: ["fragrance", "perfumes", "Colognes", "FemFragLab"],
+
+  // NEW
+  beauty: ["SkincareAddiction", "MakeupAddiction", "AsianBeauty", "beauty"],
+
+  // NEW
+  fashion: ["fashion", "streetwear", "malefashionadvice", "femalefashionadvice"],
+
 };
+
+/**
+ * Simple in-memory TTL cache (best-effort).
+ * Reduces repeated hits to Reddit public JSON when users refresh frequently.
+ * NOTE: In serverless deployments, cache may reset between cold starts.
+ */
+const CACHE_TTL_MS = 90_000; // 90s: enough to calm burst traffic, still "live"
+type CacheEntry = { ts: number; data: any };
+const RESPONSE_CACHE = new Map<string, CacheEntry>();
+
+function getCached(key: string) {
+  const entry = RESPONSE_CACHE.get(key);
+  if (!entry) return null;
+
+  const age = Date.now() - entry.ts;
+  if (age > CACHE_TTL_MS) {
+    RESPONSE_CACHE.delete(key);
+    return null;
+  }
+  return entry.data;
+}
+
+function setCached(key: string, data: any) {
+  RESPONSE_CACHE.set(key, { ts: Date.now(), data });
+}
+
+function buildCacheKey(args: {
+  pack: string | null;
+  subreddits: string[];
+  limit: number;
+}) {
+  const subs = (args.subreddits || []).map((s) => s.trim()).filter(Boolean).join(",");
+  return `reddit:${args.pack ?? "none"}:${subs}:limit=${args.limit}`;
+}
 
 function parseLimit(raw: string | null, fallback: number) {
   const n = raw ? Number(raw) : NaN;
@@ -62,6 +110,12 @@ type SubredditHealth = {
   message?: string;
 };
 
+function buildUserAgent(purpose: "health-probe" | "route") {
+  // Small jitter reduces fingerprint throttling; still honest UA string.
+  const jitter = Math.random().toString(36).slice(2, 8);
+  return `Appatize/0.1 (${purpose}) ${jitter}`;
+}
+
 async function probeSubredditHealth(
   subreddit: string,
   limit: number
@@ -75,7 +129,7 @@ async function probeSubredditHealth(
   try {
     const res = await fetch(url, {
       headers: {
-        "User-Agent": "Appatize/0.1 (health-probe)",
+        "User-Agent": buildUserAgent("health-probe"),
       },
       cache: "no-store",
       signal: controller.signal,
@@ -134,7 +188,8 @@ export async function GET(request: Request) {
     const limit = parseLimit(searchParams.get("limit"), 10);
 
     // 2) pack (preferred)
-    const pack = (searchParams.get("pack") || "").trim().toLowerCase();
+    const packRaw = (searchParams.get("pack") || "").trim().toLowerCase();
+    const pack = packRaw.length > 0 ? packRaw : null;
 
     // 3) legacy params
     const subsParam = searchParams.get("subs");
@@ -154,6 +209,13 @@ export async function GET(request: Request) {
           : DEFAULT_SUBREDDITS;
 
       subreddits = list;
+    }
+
+    // --- Cache: return quickly if we have a fresh response for this input ---
+    const cacheKey = buildCacheKey({ pack, subreddits, limit });
+    const cached = getCached(cacheKey);
+    if (cached) {
+      return NextResponse.json(cached);
     }
 
     // --- Best-effort telemetry probe (deterministic; never throws) ---
@@ -179,11 +241,11 @@ export async function GET(request: Request) {
         "Route reports best-effort drop counts. Exact per-reason counts live inside the adapter. If you want exact buckets, we can export adapter debug safely.",
     };
 
-    return NextResponse.json({
+    const payload = {
       source: "reddit",
       mode: "live",
-      status: "ok",
-      pack: pack || null,
+      status: "ok" as const,
+      pack,
       subreddits,
       limit,
 
@@ -194,19 +256,29 @@ export async function GET(request: Request) {
         estimatedDropped,
         dropReasons,
         subredditHealth: health,
+        cache: {
+          enabled: true,
+          ttlMs: CACHE_TTL_MS,
+          key: cacheKey,
+        },
       },
 
       count: trends.length,
       trends,
-    });
+    };
+
+    // Cache successful payloads briefly to reduce throttle risk
+    setCached(cacheKey, payload);
+
+    return NextResponse.json(payload);
   } catch (err) {
     console.error("[RedditRoute] Error fetching trends:", err);
 
     // Never 500
-    return NextResponse.json({
+    const payload = {
       source: "reddit",
       mode: "live",
-      status: "unavailable",
+      status: "unavailable" as const,
       pack: null,
       subreddits: [],
       limit: 0,
@@ -221,10 +293,16 @@ export async function GET(request: Request) {
           note: "Unavailable.",
         },
         subredditHealth: [] as SubredditHealth[],
+        cache: {
+          enabled: true,
+          ttlMs: CACHE_TTL_MS,
+        },
       },
       count: 0,
       trends: [],
       message: "Failed to fetch Reddit trends right now.",
-    });
+    };
+
+    return NextResponse.json(payload);
   }
 }

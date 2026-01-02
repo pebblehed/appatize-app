@@ -51,6 +51,20 @@ export interface TrendSignal {
 }
 
 /**
+ * Evidence primitives (deterministic, non-generative).
+ * These are computed from already-fetched signal timestamps and sources.
+ */
+type Evidence = {
+  signalCount: number;
+  sourceCount: number;
+  firstSeenAt?: string;
+  lastConfirmedAt?: string;
+  ageHours?: number;
+  recencyMins?: number;
+  velocityPerHour?: number;
+};
+
+/**
  * Trend interpreter:
  * TrendSignal[] → Trend[]
  *
@@ -58,12 +72,13 @@ export interface TrendSignal {
  */
 export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
   return trendSignals.map<Trend>((ts) => {
+    // --- Aggregate signal measures (deterministic) ---
     const totalScore = ts.signals.reduce((sum, s) => sum + s.score, 0);
     const avgScore = ts.signals.length ? totalScore / ts.signals.length : 0;
 
     const totalVolume = ts.signals.reduce((sum, s) => sum + (s.volume ?? 0), 0);
 
-    // Simple classification (will evolve in Stage 3).
+    // --- Status classification (deterministic thresholds; no guessing) ---
     let status: TrendStatus;
     let momentumLabel: string;
 
@@ -84,12 +99,14 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
     const marketLabel = deriveMarketLabelFromTags(allTags);
     const category = mergeCategoryWithMarket(ts.category, marketLabel);
 
-    // ---- Stage-3.2: Decision surfacing (deterministic) ----
+    // ---- Stage-3.2: Evidence primitives (deterministic) ----
     const items = ts.signals;
 
     const signalCount = items.length;
 
-    const sourceCount = new Set(items.map((it) => it.source).filter(Boolean)).size;
+    const sourceCount = new Set(
+      items.map((it) => it.source).filter(Boolean)
+    ).size;
 
     const timestamps = items
       .map((it) => it.timestamp)
@@ -106,6 +123,41 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
         ? new Date(timestamps[timestamps.length - 1]).toISOString()
         : undefined;
 
+    // Derived evidence fields (still deterministic; just math over timestamps)
+    const nowMs = Date.now();
+
+    const ageHours =
+      firstSeenAt != null
+        ? Math.max(0, (nowMs - Date.parse(firstSeenAt)) / (1000 * 60 * 60))
+        : undefined;
+
+    const recencyMins =
+      lastConfirmedAt != null
+        ? Math.max(0, (nowMs - Date.parse(lastConfirmedAt)) / (1000 * 60))
+        : undefined;
+
+    // Velocity: how many signals per hour since first seen (guardrailed)
+    // - If ageHours is tiny, avoid exploding values.
+    const velocityPerHour =
+      ageHours != null
+        ? ageHours >= 0.25
+          ? Number((signalCount / ageHours).toFixed(2))
+          : undefined
+        : undefined;
+
+    const evidence: Evidence = {
+      signalCount,
+      sourceCount,
+      firstSeenAt,
+      lastConfirmedAt,
+      ageHours: ageHours != null ? Number(ageHours.toFixed(2)) : undefined,
+      recencyMins: recencyMins != null ? Number(recencyMins.toFixed(2)) : undefined,
+      velocityPerHour,
+    };
+
+    // ---- Stage-3.2: Decision surfacing (deterministic) ----
+    // NOTE: decision semantics remain untouched. We are only attaching evidence
+    // so the UI Evidence drawer can display the exact primitives used.
     const decision = surfaceDecision({
       signalCount,
       sourceCount,
@@ -131,6 +183,10 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
 
       // Stage-3.2 decision surface
       ...decision,
+
+      // Stage-3.4+ evidence drawer support (read-only, deterministic)
+      // This is the missing piece causing UI "—" values.
+      evidence,
     };
   });
 }
@@ -195,6 +251,7 @@ function mergeCategoryWithMarket(
 
 /**
  * Stage 1 mock signals — realistic shape matching the future real adapters.
+ * NOTE: These are not referenced by live routes once mock is removed from UI.
  */
 export function getMockTrendSignals(): TrendSignal[] {
   const now = new Date().toISOString();
@@ -218,7 +275,6 @@ export function getMockTrendSignals(): TrendSignal[] {
         "Handheld, first-person city walk POV content with captions and inner monologue audio.",
       category: "UGC storytelling",
       signals: [
-        // Original 2
         s({
           label: "TikTok POV city walks",
           score: 78,
@@ -229,8 +285,6 @@ export function getMockTrendSignals(): TrendSignal[] {
           score: 64,
           tags: ["youtube_shorts", "short-form", "pov"],
         }),
-
-        // Extra evidence (same moment, more density)
         s({
           label: "IG Reels: POV walk + captions",
           score: 70,
@@ -275,7 +329,6 @@ export function getMockTrendSignals(): TrendSignal[] {
         }),
       ],
     },
-
     {
       id: "trend-day-in-the-life",
       key: "day_in_the_life_work_content",
@@ -296,7 +349,6 @@ export function getMockTrendSignals(): TrendSignal[] {
         }),
       ],
     },
-
     {
       id: "trend-expectation-vs-reality",
       key: "expectation_vs_reality_memes",
