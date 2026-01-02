@@ -13,9 +13,12 @@
 // - Safe empty states
 // - Backwards compatible params to prevent drift
 //
+// Stage 3.7 — Reddit resilience (soft cache, no drift)
+//
 // Anti-throttle hardening (deterministic, no fake intelligence):
-// - Short TTL cache per (pack/subreddits + limit) to reduce Reddit hits
-// - Lightweight User-Agent jitter to reduce fingerprint throttling
+// - Soft cache per (pack/subreddits + limit) to reduce Reddit hits
+// - If live fetch fails, serve last-known-good payload (stale-allowed window)
+// - Never mutate cached payloads (prevents drift)
 //
 // Telemetry (best-effort, deterministic):
 // - We probe each subreddit once to report raw counts + availability.
@@ -26,6 +29,7 @@
 
 import { NextResponse } from "next/server";
 import { fetchRedditTrends } from "@/engine/reddit";
+import { getSoftCache, makeCacheKey } from "@/lib/cache/softCache";
 
 export const dynamic = "force-dynamic";
 
@@ -35,9 +39,6 @@ const DEFAULT_SUBREDDITS = ["socialmedia", "marketing"];
  * Curated subreddit packs (discovery lenses).
  * Deterministic input selection only — not intelligence.
  */
-
-
-
 const PACKS: Record<string, string[]> = {
   // Core defaults
   social: ["socialmedia", "marketing"],
@@ -51,42 +52,22 @@ const PACKS: Record<string, string[]> = {
 
   // NEW
   fashion: ["fashion", "streetwear", "malefashionadvice", "femalefashionadvice"],
-
 };
 
 /**
- * Simple in-memory TTL cache (best-effort).
- * Reduces repeated hits to Reddit public JSON when users refresh frequently.
- * NOTE: In serverless deployments, cache may reset between cold starts.
+ * Stage 3.7 soft-cache policy
+ * - ttlMs: how long a value is considered "fresh"
+ * - maxStaleMs: how long we will serve last-known-good if live fails
  */
-const CACHE_TTL_MS = 90_000; // 90s: enough to calm burst traffic, still "live"
-type CacheEntry = { ts: number; data: any };
-const RESPONSE_CACHE = new Map<string, CacheEntry>();
+const SOFT_CACHE_TTL_MS = 90_000; // 90s: calms bursts, still "live-ish"
+const SOFT_CACHE_MAX_STALE_MS = 24 * 60 * 60 * 1000; // 24h: resilience fallback
 
-function getCached(key: string) {
-  const entry = RESPONSE_CACHE.get(key);
-  if (!entry) return null;
-
-  const age = Date.now() - entry.ts;
-  if (age > CACHE_TTL_MS) {
-    RESPONSE_CACHE.delete(key);
-    return null;
-  }
-  return entry.data;
-}
-
-function setCached(key: string, data: any) {
-  RESPONSE_CACHE.set(key, { ts: Date.now(), data });
-}
-
-function buildCacheKey(args: {
-  pack: string | null;
-  subreddits: string[];
-  limit: number;
-}) {
-  const subs = (args.subreddits || []).map((s) => s.trim()).filter(Boolean).join(",");
-  return `reddit:${args.pack ?? "none"}:${subs}:limit=${args.limit}`;
-}
+// Namespace isolated for this route
+const redditCache = getSoftCache<any>({
+  namespace: "reddit-signals",
+  ttlMs: SOFT_CACHE_TTL_MS,
+  maxStaleMs: SOFT_CACHE_MAX_STALE_MS,
+});
 
 function parseLimit(raw: string | null, fallback: number) {
   const n = raw ? Number(raw) : NaN;
@@ -180,7 +161,17 @@ async function probeSubredditHealth(
   }
 }
 
+function withCacheHeaders(res: NextResponse) {
+  // Soft CDN-style caching to reduce hammering; local soft-cache is still primary resilience.
+  res.headers.set(
+    "Cache-Control",
+    "public, max-age=0, s-maxage=60, stale-while-revalidate=600"
+  );
+  return res;
+}
+
 export async function GET(request: Request) {
+  // We never 500 — we always return a safe payload.
   try {
     const { searchParams } = new URL(request.url);
 
@@ -201,21 +192,32 @@ export async function GET(request: Request) {
       subreddits = PACKS[pack];
     } else {
       // Use whichever legacy param exists, otherwise fallback
-      const list =
-        parseSubList(subsParam).length > 0
-          ? parseSubList(subsParam)
-          : parseSubList(subredditsParam).length > 0
-          ? parseSubList(subredditsParam)
-          : DEFAULT_SUBREDDITS;
+      const fromSubs = parseSubList(subsParam);
+      const fromSubreddits = parseSubList(subredditsParam);
 
-      subreddits = list;
+      subreddits =
+        fromSubs.length > 0
+          ? fromSubs
+          : fromSubreddits.length > 0
+          ? fromSubreddits
+          : DEFAULT_SUBREDDITS;
     }
 
-    // --- Cache: return quickly if we have a fresh response for this input ---
-    const cacheKey = buildCacheKey({ pack, subreddits, limit });
-    const cached = getCached(cacheKey);
-    if (cached) {
-      return NextResponse.json(cached);
+    // --- Stage 3.7: stable cache key (deterministic) ---
+    const cacheKey = makeCacheKey("reddit", {
+      pack: pack ?? "none",
+      subs: subreddits,
+      limit,
+    });
+
+    // --- Stage 3.7: short-circuit if fresh cache exists (reduces Reddit hits) ---
+    const fresh = redditCache.get(cacheKey);
+    if (fresh?.meta?.isFresh) {
+      const res = NextResponse.json(fresh.data);
+      // Do NOT mutate the payload (no drift). Use headers for observability.
+      res.headers.set("X-Soft-Cache", "HIT");
+      res.headers.set("X-Soft-Cache-AgeMs", String(fresh.meta.ageMs));
+      return withCacheHeaders(res);
     }
 
     // --- Best-effort telemetry probe (deterministic; never throws) ---
@@ -258,7 +260,9 @@ export async function GET(request: Request) {
         subredditHealth: health,
         cache: {
           enabled: true,
-          ttlMs: CACHE_TTL_MS,
+          policy: "soft-cache" as const,
+          ttlMs: SOFT_CACHE_TTL_MS,
+          maxStaleMs: SOFT_CACHE_MAX_STALE_MS,
           key: cacheKey,
         },
       },
@@ -267,14 +271,58 @@ export async function GET(request: Request) {
       trends,
     };
 
-    // Cache successful payloads briefly to reduce throttle risk
-    setCached(cacheKey, payload);
+    // Stage 3.7: cache only successful payloads (last-known-good)
+    redditCache.set(cacheKey, payload);
 
-    return NextResponse.json(payload);
+    const res = NextResponse.json(payload);
+    res.headers.set("X-Soft-Cache", "MISS");
+    return withCacheHeaders(res);
   } catch (err) {
     console.error("[RedditRoute] Error fetching trends:", err);
 
-    // Never 500
+    // Stage 3.7: if live fails, serve last-known-good (stale allowed)
+    try {
+      const { searchParams } = new URL(request.url);
+      const limit = parseLimit(searchParams.get("limit"), 10);
+
+      const packRaw = (searchParams.get("pack") || "").trim().toLowerCase();
+      const pack = packRaw.length > 0 ? packRaw : null;
+
+      const subsParam = searchParams.get("subs");
+      const subredditsParam = searchParams.get("subreddits");
+
+      let subreddits: string[] = [];
+      if (pack && PACKS[pack]) {
+        subreddits = PACKS[pack];
+      } else {
+        const fromSubs = parseSubList(subsParam);
+        const fromSubreddits = parseSubList(subredditsParam);
+        subreddits =
+          fromSubs.length > 0
+            ? fromSubs
+            : fromSubreddits.length > 0
+            ? fromSubreddits
+            : DEFAULT_SUBREDDITS;
+      }
+
+      const cacheKey = makeCacheKey("reddit", {
+        pack: pack ?? "none",
+        subs: subreddits,
+        limit,
+      });
+
+      const cached = redditCache.get(cacheKey);
+      if (cached && (cached.meta.isFresh || cached.meta.isStale)) {
+        const res = NextResponse.json(cached.data);
+        res.headers.set("X-Soft-Cache", "STALE");
+        res.headers.set("X-Soft-Cache-AgeMs", String(cached.meta.ageMs));
+        return withCacheHeaders(res);
+      }
+    } catch {
+      // ignore — fall through to safe empty payload
+    }
+
+    // Never 500 — safe empty state
     const payload = {
       source: "reddit",
       mode: "live",
@@ -295,7 +343,9 @@ export async function GET(request: Request) {
         subredditHealth: [] as SubredditHealth[],
         cache: {
           enabled: true,
-          ttlMs: CACHE_TTL_MS,
+          policy: "soft-cache" as const,
+          ttlMs: SOFT_CACHE_TTL_MS,
+          maxStaleMs: SOFT_CACHE_MAX_STALE_MS,
         },
       },
       count: 0,
@@ -303,6 +353,8 @@ export async function GET(request: Request) {
       message: "Failed to fetch Reddit trends right now.",
     };
 
-    return NextResponse.json(payload);
+    const res = NextResponse.json(payload);
+    res.headers.set("X-Soft-Cache", "MISS");
+    return withCacheHeaders(res);
   }
 }
