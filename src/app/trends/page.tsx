@@ -16,6 +16,9 @@ import type {
  * - Adds decision chips (Decision / Strength / Trajectory) for fast scanning
  * - Keeps Stage 3.4 evidence drawer + tooltips (read-only, deterministic)
  * - UI now uses LIVE trends only (no mock sources in the build path)
+ *
+ * Stage 3.8 (#6):
+ * - Renders `whyThisMatters` (truth-only) if provided by /api/trends/live
  */
 
 /**
@@ -47,6 +50,9 @@ type UiTrend = {
   category: string;
   exampleHook: string;
 
+  // Stage 3.8: truth-only, deterministic explanation from API
+  whyThisMatters?: string;
+
   // Engagement debug (already used in your UI)
   debugScore?: number;
   debugVolume?: number;
@@ -73,6 +79,9 @@ type ApiTrend = {
   momentumLabel?: string;
   category?: string;
 
+  // Stage 3.8
+  whyThisMatters?: string;
+
   // Engagement debug
   debugScore?: number;
   debugVolume?: number;
@@ -97,7 +106,6 @@ type TrendSourceId =
   | "reddit-beauty"
   | "reddit-fashion"
   | "reddit-fitness";
-
 
 const SOURCE_OPTIONS: {
   id: TrendSourceId;
@@ -356,6 +364,8 @@ function mapApiTrendToUiTrend(api: ApiTrend): UiTrend {
     description: api.description,
     category,
     exampleHook: deriveExampleHook(api),
+
+    whyThisMatters: api.whyThisMatters,
 
     debugScore: api.debugScore,
     debugVolume: api.debugVolume,
@@ -727,6 +737,14 @@ export default function TrendsPage() {
                     </div>
 
                     <p className="text-xs text-neutral-300">{trend.description}</p>
+
+                    {/* Stage 3.8: Why this matters (truth-only) */}
+                    {trend.whyThisMatters && trend.whyThisMatters.trim().length > 0 && (
+                      <p className="text-[11px] text-neutral-400">
+                        <span className="text-neutral-500">Why this matters:</span>{" "}
+                        <span className="text-neutral-200">{trend.whyThisMatters}</span>
+                      </p>
+                    )}
 
                     {(trend.debugScore != null || trend.debugVolume != null) && (
                       <p className="text-[11px] text-neutral-500">

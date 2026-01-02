@@ -16,6 +16,22 @@ import React, {
 
 export type TrendStatus = "Emerging" | "Peaking" | "Stable";
 
+// Stage 3+ (deterministic, read-only) decision semantics
+export type DecisionState = "ACT" | "WAIT" | "REFRESH";
+export type ConfidenceTrajectory = "ACCELERATING" | "STABLE" | "WEAKENING" | "VOLATILE";
+export type SignalStrength = "WEAK" | "MODERATE" | "STRONG";
+
+// Stage 3.4+ evidence primitives (deterministic, read-only)
+export type Evidence = {
+  signalCount: number;
+  sourceCount: number;
+  firstSeenAt?: string;
+  lastConfirmedAt?: string;
+  ageHours?: number;
+  recencyMins?: number;
+  velocityPerHour?: number;
+};
+
 export interface Trend {
   id: string;
   status: TrendStatus;
@@ -24,7 +40,19 @@ export interface Trend {
   formatLabel: string;
   momentumLabel: string;
   category?: string;
-  
+
+  // Stage 3.8 (#6): truth-only explanation (optional)
+  whyThisMatters?: string;
+
+  // Stage 3.4+ decision semantics (optional, deterministic)
+  decisionState?: DecisionState;
+  confidenceTrajectory?: ConfidenceTrajectory;
+  signalStrength?: SignalStrength;
+  decisionRationale?: string;
+
+  // Stage 3.4+ evidence primitives (optional, deterministic)
+  evidence?: Evidence;
+
   // Optional debug fields for validation (safe to omit in production)
   debugScore?: number;
   debugVolume?: number;
