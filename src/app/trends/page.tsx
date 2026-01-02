@@ -24,7 +24,7 @@ import type {
  * - Receives + can carry `actionHint` (one short deterministic sentence)
  *
  * Stage #8:
- * - Save / pin moment (by id) via TrendContext (localStorage-backed)
+ * - Save / pin moment (localStorage-backed) via TrendContext
  */
 
 /**
@@ -521,10 +521,12 @@ function trajectoryTooltip(t: UiTrend) {
 
 export default function TrendsPage() {
   const router = useRouter();
+
+  // ✅ Stage #8 wiring: use TrendContext's canonical pin API
   const {
     setSelectedTrend: setCoreSelectedTrend,
-    isPinned,
-    togglePin,
+    isTrendPinned,
+    togglePinTrend,
   } = useTrendContext();
 
   // Live-only default (no mock option)
@@ -665,9 +667,7 @@ export default function TrendsPage() {
               ))}
             </select>
 
-            <span className="text-[10px] text-neutral-600">
-              Filters what you&apos;re viewing — it doesn&apos;t change the moment.
-            </span>
+            <span className="text-[10px] text-neutral-600">Filters what you&apos;re viewing — it doesn&apos;t change the moment.</span>
 
             <Link
               href="/"
@@ -696,7 +696,9 @@ export default function TrendsPage() {
           <section className="grid gap-4 md:grid-cols-2">
             {filteredTrends.map((trend) => {
               const isEvidenceOpen = expandedEvidenceId === trend.id;
-              const saved = isPinned(trend.id);
+
+              // ✅ Canonical check from TrendContext
+              const saved = isTrendPinned(trend.id);
 
               return (
                 <article
@@ -714,9 +716,7 @@ export default function TrendsPage() {
                           {statusLabel(trend.status)}
                         </p>
                         <h2 className="text-sm font-semibold text-neutral-50">{trend.name}</h2>
-                        {trend.movementLabel && (
-                          <p className="text-[11px] text-neutral-500">{trend.movementLabel}</p>
-                        )}
+                        {trend.movementLabel && <p className="text-[11px] text-neutral-500">{trend.movementLabel}</p>}
                       </div>
 
                       <div className="flex items-center gap-2">
@@ -727,7 +727,7 @@ export default function TrendsPage() {
                         {/* Stage #8 — Save / pin moment */}
                         <button
                           type="button"
-                          onClick={() => togglePin(trend.id)}
+                          onClick={() => togglePinTrend(mapUiTrendToCoreTrend(trend))}
                           className={`inline-flex items-center gap-1 rounded-pill border px-2 py-0.5 text-[10px] font-medium transition-colors ${
                             saved
                               ? "border-brand-pink/50 bg-brand-pink/15 text-brand-pink hover:bg-brand-pink/20"
@@ -756,17 +756,11 @@ export default function TrendsPage() {
                         {trend.decisionState ?? "—"}
                       </span>
 
-                      <span
-                        className={chipClassForStrength(trend.signalStrength)}
-                        title={strengthTooltip(trend)}
-                      >
+                      <span className={chipClassForStrength(trend.signalStrength)} title={strengthTooltip(trend)}>
                         Strength: {trend.signalStrength ?? "—"}
                       </span>
 
-                      <span
-                        className={chipClassForTrajectory(trend.confidenceTrajectory)}
-                        title={trajectoryTooltip(trend)}
-                      >
+                      <span className={chipClassForTrajectory(trend.confidenceTrajectory)} title={trajectoryTooltip(trend)}>
                         {trend.confidenceTrajectory ?? "—"}
                       </span>
                     </div>
@@ -866,8 +860,7 @@ export default function TrendsPage() {
                         onClick={() => goToBriefsWithTrend(trend)}
                         className="inline-flex items-center gap-1 rounded-pill bg-brand-pink px-3 py-1 text-[11px] font-semibold text-black transition-colors hover:bg-brand-pink-soft"
                       >
-                        Turn into brief
-                        <span className="text-xs">↗</span>
+                        Turn into brief <span className="text-xs">↗</span>
                       </button>
                     </div>
                   </div>
