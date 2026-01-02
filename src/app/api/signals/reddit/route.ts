@@ -26,6 +26,11 @@
 // - "dropped" is estimated as rawCount - keptCount (keptCount = trends.length).
 //   This should be close because the adapter is 1-post → 1-trend after hygiene,
 //   but counts can differ slightly because the probe + engine fetch are separate calls.
+//
+// Stage 10 — Stop rule / kill-switch discipline (deterministic)
+// - If SIGNALS_DISABLED is enabled, return an honest empty state.
+// - No upstream calls, no cache reads, no probes, no engine fetch.
+// - Never 500.
 
 import { NextResponse } from "next/server";
 import { fetchRedditTrends } from "@/engine/reddit";
@@ -170,7 +175,56 @@ function withCacheHeaders(res: NextResponse) {
   return res;
 }
 
+/**
+ * Stage 10 — Kill-switch check (deterministic)
+ * Accepts: "1", "true", "yes", "on"
+ */
+function isSignalsDisabled(): boolean {
+  const raw = (process.env.SIGNALS_DISABLED || "").trim().toLowerCase();
+  if (!raw) return false;
+  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+}
+
 export async function GET(request: Request) {
+  // Stage 10: hard stop at the top (no upstream calls, no cache reads/writes)
+  if (isSignalsDisabled()) {
+    const payload = {
+      source: "reddit",
+      mode: "disabled",
+      status: "unavailable" as const,
+      pack: null,
+      subreddits: [] as string[],
+      limit: 0,
+      telemetry: {
+        rawCount: 0,
+        keptCount: 0,
+        estimatedDropped: 0,
+        dropReasons: {
+          structural_noise: null,
+          meta_post: null,
+          other: 0,
+          note: "Signals disabled by kill-switch (SIGNALS_DISABLED).",
+        },
+        subredditHealth: [] as SubredditHealth[],
+        cache: {
+          enabled: false,
+          policy: "soft-cache" as const,
+          ttlMs: SOFT_CACHE_TTL_MS,
+          maxStaleMs: SOFT_CACHE_MAX_STALE_MS,
+        },
+      },
+      count: 0,
+      trends: [],
+      message: "Signals are temporarily disabled.",
+    };
+
+    const res = NextResponse.json(payload, { status: 200 });
+    res.headers.set("X-Kill-Switch", "ON");
+    // Do not cache a disabled response.
+    res.headers.set("Cache-Control", "no-store");
+    return res;
+  }
+
   // We never 500 — we always return a safe payload.
   try {
     const { searchParams } = new URL(request.url);
