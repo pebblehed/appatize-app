@@ -1,114 +1,126 @@
 // src/context/TrendContext.tsx
 "use client";
 
-import React, {
-  createContext,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-  ReactNode,
-} from "react";
+import React, { createContext, useContext, useEffect, useMemo, useState, ReactNode } from "react";
 import type { Trend } from "./BriefContext";
 
-const PINNED_TRENDS_STORAGE_KEY = "app:pinnedTrends:v1";
-
 interface TrendContextValue {
+  // Existing
   selectedTrend: Trend | null;
   setSelectedTrend: (t: Trend | null) => void;
 
-  // Stage #8 — Save / pin moment (deterministic)
-  pinnedIds: string[];
-  isPinned: (id: string) => boolean;
-  togglePin: (id: string) => void;
-  clearPins: () => void;
+  // Stage #8 — Save / Pin moment (local-first)
+  pinnedTrends: Trend[];
+  isTrendPinned: (trendOrId: Trend | string) => boolean;
+  togglePinTrend: (trend: Trend) => void;
+  unpinTrend: (trendOrId: Trend | string) => void;
+  clearPinnedTrends: () => void;
 }
 
 /**
  * TrendContext
  *
  * Holds the globally selected Trend that the user is working with.
- * Also holds pinned/saved trends (by id) for quick recall.
  *
- * Flow:
- *   TrendsPage       → setSelectedTrend(trend)
- *   Trend cards      → togglePin(trend.id)
- *   AngleCard        → reads selectedTrend + angle → generateBriefFromAngle(...)
- *   BriefContext     → stores activeBrief
- *   ScriptsPage      → generates scripts from activeBrief
+ * Stage #8 (Save / Pin):
+ * - Local-first persistence via localStorage (deterministic)
+ * - No network calls, no backend dependency
+ * - Safe parsing + never-throw behaviour
  */
 const TrendContext = createContext<TrendContextValue | undefined>(undefined);
 
-function safeReadPinnedIds(): string[] {
+// LocalStorage key (versioned so we can migrate later safely)
+const PINNED_KEY = "appatize:pinnedTrends:v1";
+
+function safeParsePinned(raw: string | null): Trend[] {
+  if (!raw) return [];
   try {
-    const raw = localStorage.getItem(PINNED_TRENDS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
+    const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    // keep only strings, unique, non-empty
-    const cleaned = parsed
-      .filter((x) => typeof x === "string")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    return Array.from(new Set(cleaned));
+    // Minimal shape guard
+    return parsed
+      .filter((t) => t && typeof t === "object")
+      .filter((t) => typeof t.id === "string" && typeof t.name === "string")
+      .map((t) => t as Trend);
   } catch {
     return [];
   }
 }
 
-function safeWritePinnedIds(ids: string[]) {
-  try {
-    localStorage.setItem(PINNED_TRENDS_STORAGE_KEY, JSON.stringify(ids));
-  } catch {
-    // ignore storage write failures (private mode, quota, etc.)
+function uniqById(trends: Trend[]): Trend[] {
+  const seen = new Set<string>();
+  const out: Trend[] = [];
+  for (const t of trends) {
+    if (!t?.id) continue;
+    if (seen.has(t.id)) continue;
+    seen.add(t.id);
+    out.push(t);
   }
+  return out;
 }
 
 export function TrendProvider({ children }: { children: ReactNode }) {
   const [selectedTrend, setSelectedTrend] = useState<Trend | null>(null);
 
-  // Pinned trends are stored as IDs only (stable + small)
-  const [pinnedIds, setPinnedIds] = useState<string[]>([]);
+  // Stage #8 pinned state (local-first)
+  const [pinnedTrends, setPinnedTrends] = useState<Trend[]>([]);
 
-  // Load pins once on mount (client-only)
+  // Load pinned trends once on mount (client-only)
   useEffect(() => {
-    setPinnedIds(safeReadPinnedIds());
+    const initial = safeParsePinned(
+      typeof window !== "undefined" ? window.localStorage.getItem(PINNED_KEY) : null
+    );
+    setPinnedTrends(uniqById(initial));
   }, []);
 
-  // Persist pins whenever they change
+  // Persist whenever pinned changes
   useEffect(() => {
-    safeWritePinnedIds(pinnedIds);
-  }, [pinnedIds]);
+    try {
+      if (typeof window === "undefined") return;
+      window.localStorage.setItem(PINNED_KEY, JSON.stringify(uniqById(pinnedTrends)));
+    } catch {
+      // Never throw — storage can fail (quota, privacy mode)
+    }
+  }, [pinnedTrends]);
 
-  const isPinned = useMemo(() => {
-    const set = new Set(pinnedIds);
-    return (id: string) => set.has(id);
-  }, [pinnedIds]);
+  const pinnedIdSet = useMemo(() => new Set(pinnedTrends.map((t) => t.id)), [pinnedTrends]);
 
-  const togglePin = (id: string) => {
-    const tid = typeof id === "string" ? id.trim() : "";
-    if (!tid) return;
+  const isTrendPinned = (trendOrId: Trend | string) => {
+    const id = typeof trendOrId === "string" ? trendOrId : trendOrId?.id;
+    if (!id) return false;
+    return pinnedIdSet.has(id);
+  };
 
-    setPinnedIds((prev) => {
-      const has = prev.includes(tid);
-      if (has) return prev.filter((x) => x !== tid);
-      return [...prev, tid];
+  const togglePinTrend = (trend: Trend) => {
+    if (!trend?.id) return;
+
+    setPinnedTrends((prev) => {
+      const exists = prev.some((t) => t.id === trend.id);
+      if (exists) {
+        return prev.filter((t) => t.id !== trend.id);
+      }
+      return uniqById([trend, ...prev]);
     });
   };
 
-  const clearPins = () => {
-    setPinnedIds([]);
+  const unpinTrend = (trendOrId: Trend | string) => {
+    const id = typeof trendOrId === "string" ? trendOrId : trendOrId?.id;
+    if (!id) return;
+    setPinnedTrends((prev) => prev.filter((t) => t.id !== id));
   };
+
+  const clearPinnedTrends = () => setPinnedTrends([]);
 
   return (
     <TrendContext.Provider
       value={{
         selectedTrend,
         setSelectedTrend,
-        pinnedIds,
-        isPinned,
-        togglePin,
-        clearPins,
+        pinnedTrends,
+        isTrendPinned,
+        togglePinTrend,
+        unpinTrend,
+        clearPinnedTrends,
       }}
     >
       {children}
@@ -118,8 +130,6 @@ export function TrendProvider({ children }: { children: ReactNode }) {
 
 export function useTrendContext(): TrendContextValue {
   const ctx = useContext(TrendContext);
-  if (!ctx) {
-    throw new Error("useTrendContext must be used inside TrendProvider");
-  }
+  if (!ctx) throw new Error("useTrendContext must be used inside TrendProvider");
   return ctx;
 }
