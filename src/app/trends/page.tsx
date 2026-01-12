@@ -5,11 +5,10 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import FullAnglesModal from "./FullAnglesModal";
+import { useBriefContext } from "@/context/BriefContext";
+import type { Angle } from "@/context/BriefContext";
 import { useTrendContext } from "@/context/TrendContext";
-import type {
-  Trend as CoreTrend,
-  TrendStatus as CoreTrendStatus,
-} from "@/context/BriefContext";
+import type { Trend as CoreTrend, TrendStatus as CoreTrendStatus } from "@/context/BriefContext";
 
 /**
  * TrendsPage (Stage 3.5)
@@ -25,6 +24,9 @@ import type {
  *
  * Stage #8:
  * - Save / pin moment (localStorage-backed) via TrendContext
+ *
+ * Stage #8 (flow fix):
+ * - "Turn into brief" now CREATES a deterministic Draft brief (like Saved) before routing to /briefs
  */
 
 /**
@@ -139,11 +141,7 @@ const SOURCE_OPTIONS: {
     label: "Reddit: Beauty / Skincare",
     apiPath: "/api/trends/live?pack=beauty",
   },
-  {
-    id: "reddit-fashion",
-    label: "Reddit: Fashion",
-    apiPath: "/api/trends/live?pack=fashion",
-  },
+  { id: "reddit-fashion", label: "Reddit: Fashion", apiPath: "/api/trends/live?pack=fashion" },
   {
     id: "reddit-fitness",
     label: "Reddit: Fitness / Wellness",
@@ -152,7 +150,7 @@ const SOURCE_OPTIONS: {
 ];
 
 /**
- * Strategy lens (DISCOVERY FILTER).
+ * Category lens (DISCOVERY FILTER).
  * IMPORTANT:
  * - This must NOT change what a "moment" is; it only narrows what the user is viewing.
  * - No qualification / ranking / decision semantics happen here.
@@ -261,17 +259,7 @@ const LENS_KEYWORDS: Record<StrategyLensId, string[]> = {
     "tour",
     "flight",
   ],
-  tech: [
-    "tech",
-    "ai",
-    "app",
-    "software",
-    "device",
-    "gadget",
-    "startup",
-    "open source",
-    "product",
-  ],
+  tech: ["tech", "ai", "app", "software", "device", "gadget", "startup", "open source", "product"],
   finance: [
     "finance",
     "invest",
@@ -283,16 +271,7 @@ const LENS_KEYWORDS: Record<StrategyLensId, string[]> = {
     "interest rates",
     "inflation",
   ],
-  gaming: [
-    "gaming",
-    "game",
-    "xbox",
-    "playstation",
-    "nintendo",
-    "steam",
-    "esports",
-    "streaming",
-  ],
+  gaming: ["gaming", "game", "xbox", "playstation", "nintendo", "steam", "esports", "streaming"],
   creator: [
     "creator",
     "ugc",
@@ -393,7 +372,6 @@ function mapApiTrendToUiTrend(api: ApiTrend): UiTrend {
 
 /**
  * Map UI trend → core Trend used by the engine/BriefContext.
- * This is what AngleCard expects via TrendContext.
  */
 function mapUiStatusToCoreStatus(status: TrendStatus): CoreTrendStatus {
   switch (status) {
@@ -408,7 +386,20 @@ function mapUiStatusToCoreStatus(status: TrendStatus): CoreTrendStatus {
   }
 }
 
-function mapUiTrendToCoreTrend(ui: UiTrend): CoreTrend {
+type StopRule = {
+  active: boolean;
+  code: string;
+  reason: string;
+};
+
+// Keep this locally without changing the upstream Trend type.
+// Structural typing means it can still be passed to functions expecting CoreTrend.
+type CoreTrendExtended = CoreTrend & {
+  actionHint?: string;
+  stopRule?: StopRule;
+};
+
+function mapUiTrendToCoreTrend(ui: UiTrend): CoreTrendExtended {
   return {
     id: ui.id,
     status: mapUiStatusToCoreStatus(ui.status),
@@ -420,6 +411,16 @@ function mapUiTrendToCoreTrend(ui: UiTrend): CoreTrend {
 
     // Stage 3.9 (optional): carry through for downstream UI
     actionHint: ui.actionHint,
+
+    // Stage 10 — Stop rule (deterministic; UI discipline)
+    stopRule: {
+      active: ui.decisionState !== "ACT",
+      code: ui.decisionState === "ACT" ? "STOP_UNKNOWN" : "STOP_NOT_ACT",
+      reason:
+        ui.decisionState === "ACT"
+          ? "No stop rule."
+          : `Stop rule: decision is ${ui.decisionState ?? "—"} — do not act yet.`,
+    },
   };
 }
 
@@ -434,7 +435,6 @@ function matchesStrategyLens(trend: UiTrend, lens: StrategyLensId) {
   const keywords = LENS_KEYWORDS[lens] || [];
   if (keywords.some((k) => haystack.includes(normalize(k)))) return true;
 
-  // Also allow direct category contains (in case category is "Work-life" etc later)
   const cat = normalize(trend.category);
   if (cat.includes(lens)) return true;
 
@@ -462,7 +462,6 @@ function pillBaseClass() {
 }
 
 function chipClassForDecision(decision?: DecisionState) {
-  // No assumptions; purely visual.
   switch (decision) {
     case "ACT":
       return `${pillBaseClass()} border-brand-pink/50 bg-brand-pink/15 text-brand-pink`;
@@ -522,6 +521,9 @@ function trajectoryTooltip(t: UiTrend) {
 export default function TrendsPage() {
   const router = useRouter();
 
+  // ✅ Brief creation (deterministic) for "Turn into brief"
+  const { generateBriefFromAngle } = useBriefContext();
+
   // ✅ Stage #8 wiring: use TrendContext's canonical pin API
   const {
     setSelectedTrend: setCoreSelectedTrend,
@@ -541,6 +543,33 @@ export default function TrendsPage() {
 
   // Evidence panel expanded state (per trend id)
   const [expandedEvidenceId, setExpandedEvidenceId] = useState<string | null>(null);
+
+  // ✅ Deterministic brief creation (same behaviour as Saved)
+  const turnIntoBrief = (uiTrend: UiTrend) => {
+    const coreTrend = mapUiTrendToCoreTrend(uiTrend);
+
+    // 1) ensure global selection is set (keeps app consistent)
+    setCoreSelectedTrend(coreTrend);
+
+    // 2) deterministic "Direct brief" angle (no AI)
+    const directAngle: Angle = {
+      id: `direct:${coreTrend.id}`,
+      label: "Direct brief",
+      hook: "Turn this trend into a clear, usable brief.",
+      platform: "Multi",
+      format: "Brief",
+      audience: "",
+      outcome: "",
+      notes: "Auto-generated from Trends (Stage #8).",
+    };
+
+    // 3) create brief
+    generateBriefFromAngle(coreTrend, directAngle);
+
+    // 4) route to briefs library
+    const params = new URLSearchParams({ trend: coreTrend.name });
+    router.push(`/briefs?${params.toString()}`);
+  };
 
   // Fetch trends whenever the source changes
   useEffect(() => {
@@ -569,13 +598,11 @@ export default function TrendsPage() {
         }
 
         const data = (await res.json()) as TrendsApiResponse;
-
-        // If live is temporarily unavailable, we show empty (never swap in mock).
         const uiTrends = (data.trends || []).map(mapApiTrendToUiTrend);
 
         if (!cancelled) {
           setTrends(uiTrends);
-          setExpandedEvidenceId(null); // reset when source changes
+          setExpandedEvidenceId(null);
         }
       } catch (err) {
         console.error("[TrendsPage] fetch error:", err);
@@ -585,9 +612,7 @@ export default function TrendsPage() {
           setExpandedEvidenceId(null);
         }
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+        if (!cancelled) setLoading(false);
       }
     }
 
@@ -603,22 +628,12 @@ export default function TrendsPage() {
   }, [trends, strategyLens]);
 
   const openAngles = (trend: UiTrend) => {
-    // 1) Tell the engine which *core* trend is active
     const coreTrend = mapUiTrendToCoreTrend(trend);
     setCoreSelectedTrend(coreTrend);
-
-    // 2) Open the modal with the UI trend
     setSelectedTrend(trend);
   };
 
-  const closeAngles = () => {
-    setSelectedTrend(null);
-  };
-
-  const goToBriefsWithTrend = (trend: UiTrend) => {
-    const params = new URLSearchParams({ trend: trend.name });
-    router.push(`/briefs?${params.toString()}`);
-  };
+  const closeAngles = () => setSelectedTrend(null);
 
   const toggleEvidence = (id: string) => {
     setExpandedEvidenceId((prev) => (prev === id ? null : id));
@@ -627,16 +642,14 @@ export default function TrendsPage() {
   return (
     <>
       <div className="space-y-6">
-        {/* Header */}
         <header className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">Trends</h1>
           <p className="text-sm text-neutral-400">
-            Appatize&apos;s cultural radar. Live signal-backed topics (Reddit for now), shaped into a stable Trend[]
-            contract for briefs and script generation.
+            Appatize&apos;s cultural radar. Live signal-backed topics (Reddit for now), shaped into
+            a stable Trend[] contract for briefs and script generation.
           </p>
         </header>
 
-        {/* Helper bar: step + selectors + back link */}
         <div className="flex flex-wrap items-center justify-between gap-3 text-[11px] text-neutral-400">
           <p>Step 1 in the flow: pick a trend → turn it into a brief → generate scripts.</p>
 
@@ -654,7 +667,7 @@ export default function TrendsPage() {
               ))}
             </select>
 
-            <span className="ml-1 text-neutral-500">Strategy lens:</span>
+            <span className="ml-1 text-neutral-500">Category lens:</span>
             <select
               value={strategyLens}
               onChange={(e) => setStrategyLens(e.target.value as StrategyLensId)}
@@ -667,7 +680,9 @@ export default function TrendsPage() {
               ))}
             </select>
 
-            <span className="text-[10px] text-neutral-600">Filters what you&apos;re viewing — it doesn&apos;t change the moment.</span>
+            <span className="text-[10px] text-neutral-600">
+              Filters what you&apos;re viewing — it doesn&apos;t change the moment.
+            </span>
 
             <Link
               href="/"
@@ -678,7 +693,6 @@ export default function TrendsPage() {
           </div>
         </div>
 
-        {/* Loading / error states */}
         {loading && (
           <div className="rounded-2xl border border-shell-border bg-shell-panel/80 p-4 text-xs text-neutral-400">
             Loading trends…
@@ -691,13 +705,10 @@ export default function TrendsPage() {
           </div>
         )}
 
-        {/* Trends grid */}
         {!loading && !error && filteredTrends.length > 0 && (
           <section className="grid gap-4 md:grid-cols-2">
             {filteredTrends.map((trend) => {
               const isEvidenceOpen = expandedEvidenceId === trend.id;
-
-              // ✅ Canonical check from TrendContext
               const saved = isTrendPinned(trend.id);
 
               return (
@@ -709,14 +720,14 @@ export default function TrendsPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="space-y-1">
                         <p
-                          className={`mb-1 text-[11px] font-medium uppercase tracking-[0.16em] ${statusClass(
-                            trend.status
-                          )}`}
+                          className={`mb-1 text-[11px] font-medium uppercase tracking-[0.16em] ${statusClass(trend.status)}`}
                         >
                           {statusLabel(trend.status)}
                         </p>
                         <h2 className="text-sm font-semibold text-neutral-50">{trend.name}</h2>
-                        {trend.movementLabel && <p className="text-[11px] text-neutral-500">{trend.movementLabel}</p>}
+                        {trend.movementLabel && (
+                          <p className="text-[11px] text-neutral-500">{trend.movementLabel}</p>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-2">
@@ -724,7 +735,6 @@ export default function TrendsPage() {
                           {trend.category}
                         </span>
 
-                        {/* Stage #8 — Save / pin moment */}
                         <button
                           type="button"
                           onClick={() => togglePinTrend(mapUiTrendToCoreTrend(trend))}
@@ -738,7 +748,6 @@ export default function TrendsPage() {
                           {saved ? "Saved" : "Save"} <span aria-hidden>📌</span>
                         </button>
 
-                        {/* Evidence toggle (Stage 3.4) */}
                         <button
                           type="button"
                           onClick={() => toggleEvidence(trend.id)}
@@ -750,22 +759,29 @@ export default function TrendsPage() {
                       </div>
                     </div>
 
-                    {/* Stage 3.5: Decision chips row (read-only) */}
                     <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                      <span className={chipClassForDecision(trend.decisionState)} title={decisionTooltip(trend)}>
+                      <span
+                        className={chipClassForDecision(trend.decisionState)}
+                        title={decisionTooltip(trend)}
+                      >
                         {trend.decisionState ?? "—"}
                       </span>
 
-                      <span className={chipClassForStrength(trend.signalStrength)} title={strengthTooltip(trend)}>
+                      <span
+                        className={chipClassForStrength(trend.signalStrength)}
+                        title={strengthTooltip(trend)}
+                      >
                         Strength: {trend.signalStrength ?? "—"}
                       </span>
 
-                      <span className={chipClassForTrajectory(trend.confidenceTrajectory)} title={trajectoryTooltip(trend)}>
+                      <span
+                        className={chipClassForTrajectory(trend.confidenceTrajectory)}
+                        title={trajectoryTooltip(trend)}
+                      >
                         {trend.confidenceTrajectory ?? "—"}
                       </span>
                     </div>
 
-                    {/* Stage 3.9: Minimal action hint (truth-only) */}
                     {trend.actionHint && trend.actionHint.trim().length > 0 && (
                       <p className="text-[11px] text-neutral-400">
                         <span className="text-neutral-500">Next:</span>{" "}
@@ -775,7 +791,6 @@ export default function TrendsPage() {
 
                     <p className="text-xs text-neutral-300">{trend.description}</p>
 
-                    {/* Stage 3.8: Why this matters (truth-only) */}
                     {trend.whyThisMatters && trend.whyThisMatters.trim().length > 0 && (
                       <p className="text-[11px] text-neutral-400">
                         <span className="text-neutral-500">Why this matters:</span>{" "}
@@ -785,11 +800,11 @@ export default function TrendsPage() {
 
                     {(trend.debugScore != null || trend.debugVolume != null) && (
                       <p className="text-[11px] text-neutral-500">
-                        Engagement: ups={trend.debugScore ?? "—"} • comments={trend.debugVolume ?? "—"}
+                        Engagement: ups={trend.debugScore ?? "—"} • comments=
+                        {trend.debugVolume ?? "—"}
                       </p>
                     )}
 
-                    {/* Stage 3.4 Evidence Panel (read-only, optional) */}
                     {isEvidenceOpen && (
                       <div className="rounded-xl border border-shell-border bg-black/20 p-3 text-[11px] text-neutral-300">
                         <div className="flex flex-wrap gap-x-6 gap-y-2">
@@ -799,7 +814,9 @@ export default function TrendsPage() {
                           </div>
                           <div>
                             <span className="text-neutral-500">Trajectory:</span>{" "}
-                            <span className="text-neutral-100">{trend.confidenceTrajectory ?? "—"}</span>
+                            <span className="text-neutral-100">
+                              {trend.confidenceTrajectory ?? "—"}
+                            </span>
                           </div>
                           <div>
                             <span className="text-neutral-500">Strength:</span>{" "}
@@ -807,31 +824,42 @@ export default function TrendsPage() {
                           </div>
                           <div>
                             <span className="text-neutral-500">Density:</span>{" "}
-                            <span className="text-neutral-100">{trend.evidence?.signalCount ?? "—"}</span>
+                            <span className="text-neutral-100">
+                              {trend.evidence?.signalCount ?? "—"}
+                            </span>
                           </div>
                           <div>
                             <span className="text-neutral-500">Breadth:</span>{" "}
-                            <span className="text-neutral-100">{trend.evidence?.sourceCount ?? "—"}</span>
+                            <span className="text-neutral-100">
+                              {trend.evidence?.sourceCount ?? "—"}
+                            </span>
                           </div>
                           <div>
                             <span className="text-neutral-500">Freshness:</span>{" "}
-                            <span className="text-neutral-100">{formatRecency(trend.evidence?.recencyMins)}</span>
+                            <span className="text-neutral-100">
+                              {formatRecency(trend.evidence?.recencyMins)}
+                            </span>
                           </div>
                           <div>
                             <span className="text-neutral-500">Age:</span>{" "}
-                            <span className="text-neutral-100">{formatAge(trend.evidence?.ageHours)}</span>
+                            <span className="text-neutral-100">
+                              {formatAge(trend.evidence?.ageHours)}
+                            </span>
                           </div>
                           <div>
                             <span className="text-neutral-500">Velocity:</span>{" "}
                             <span className="text-neutral-100">
-                              {trend.evidence?.velocityPerHour != null ? `${trend.evidence.velocityPerHour}/h` : "—"}
+                              {trend.evidence?.velocityPerHour != null
+                                ? `${trend.evidence.velocityPerHour}/h`
+                                : "—"}
                             </span>
                           </div>
                         </div>
 
                         {trend.decisionRationale && (
                           <p className="mt-2 text-neutral-400">
-                            <span className="text-neutral-500">Rationale:</span> {trend.decisionRationale}
+                            <span className="text-neutral-500">Rationale:</span>{" "}
+                            {trend.decisionRationale}
                           </p>
                         )}
                       </div>
@@ -844,7 +872,8 @@ export default function TrendsPage() {
 
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                     <div className="text-[11px] text-neutral-500">
-                      Step into this trend with Appatize to generate creator-native angles and scripts.
+                      Step into this trend with Appatize to generate creator-native angles and
+                      scripts.
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
@@ -855,9 +884,11 @@ export default function TrendsPage() {
                       >
                         View angles
                       </button>
+
+                      {/* ✅ FIXED: create brief deterministically, then go to /briefs */}
                       <button
                         type="button"
-                        onClick={() => goToBriefsWithTrend(trend)}
+                        onClick={() => turnIntoBrief(trend)}
                         className="inline-flex items-center gap-1 rounded-pill bg-brand-pink px-3 py-1 text-[11px] font-semibold text-black transition-colors hover:bg-brand-pink-soft"
                       >
                         Turn into brief <span className="text-xs">↗</span>
@@ -877,7 +908,6 @@ export default function TrendsPage() {
         )}
       </div>
 
-      {/* Angles modal */}
       {selectedTrend && <FullAnglesModal trend={selectedTrend} onClose={closeAngles} />}
     </>
   );

@@ -3,8 +3,7 @@
 
 import { useRouter } from "next/navigation";
 import { useTrendContext } from "@/context/TrendContext";
-import { useBriefContext, type Angle } from "@/context/BriefContext";
-import type { Trend as CoreTrend, TrendStatus as CoreTrendStatus } from "@/context/BriefContext";
+import { useBriefContext, type Angle, type Trend, type TrendStatus } from "@/context/BriefContext";
 
 /**
  * SavedPage (Stage #8 — Save / pin moment)
@@ -12,16 +11,16 @@ import type { Trend as CoreTrend, TrendStatus as CoreTrendStatus } from "@/conte
  * Deterministic behaviour:
  * - Uses TrendContext pinnedTrends (localStorage-backed).
  * - No network calls.
- * - Never-500: safe empty states.
+ * - Safe empty states.
  *
  * Stage #8 fix:
- * - "Turn into brief" MUST actually create a brief (via BriefContext)
- * - Then route to /scripts (where the active brief is consumed)
+ * - "Turn into brief" creates a brief (via BriefContext)
+ * - Routes to /briefs so the draft appears in the library
  *
  * No new intelligence, no LLM.
  */
 
-function mapStatusToLabel(status?: CoreTrendStatus) {
+function mapStatusToLabel(status?: TrendStatus) {
   switch (status) {
     case "Emerging":
       return { label: "Emerging", className: "text-trend-emerging" };
@@ -33,13 +32,21 @@ function mapStatusToLabel(status?: CoreTrendStatus) {
   }
 }
 
+function readTrimmedStringField(obj: unknown, key: string): string | null {
+  if (!obj || typeof obj !== "object") return null;
+  const v = (obj as Record<string, unknown>)[key];
+  if (typeof v !== "string") return null;
+  const s = v.trim();
+  return s.length > 0 ? s : null;
+}
+
 export default function SavedPage() {
   const router = useRouter();
 
   const { pinnedTrends, unpinTrend, clearPinnedTrends, setSelectedTrend } = useTrendContext();
   const { generateBriefFromAngle } = useBriefContext();
 
-  const turnIntoBrief = (trend: CoreTrend) => {
+  const turnIntoBrief = (trend: Trend) => {
     // 1) Make this the globally selected trend (consistent with the rest of the app)
     setSelectedTrend(trend);
 
@@ -55,18 +62,20 @@ export default function SavedPage() {
       notes: "Auto-generated from a saved moment (Stage #8).",
     };
 
-    // 3) Create the active brief in BriefContext
+    // 3) Create the brief (adds it into BriefContext so it appears in the Briefs library)
     generateBriefFromAngle(trend, directAngle);
 
-    // 4) Go straight to Scripts (Briefs page is a library view, not the generator)
-    router.push("/scripts");
+    // 4) Go to Briefs (library), where the draft will appear
+    router.push("/briefs");
   };
 
   return (
     <div className="space-y-8">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Saved</h1>
-        <p className="text-sm text-neutral-400">Your pinned moments (Stage #8). Local-first storage on this device.</p>
+        <p className="text-sm text-neutral-400">
+          Your pinned moments (Stage #8). Local-first storage on this device.
+        </p>
       </header>
 
       {/* Controls */}
@@ -101,7 +110,8 @@ export default function SavedPage() {
         <section className="rounded-2xl border border-shell-border bg-shell-panel p-6 text-xs text-neutral-300 shadow-ring-soft">
           <p className="text-neutral-400">No saved moments yet.</p>
           <p className="mt-2 text-neutral-500">
-            Go to Trends and hit <span className="text-neutral-200">Pin ☆</span> on any moment you want to keep.
+            Go to Trends and hit <span className="text-neutral-200">Pin ☆</span> on any moment you
+            want to keep.
           </p>
         </section>
       )}
@@ -111,6 +121,7 @@ export default function SavedPage() {
         <section className="grid gap-4 md:grid-cols-2">
           {pinnedTrends.map((t) => {
             const ui = mapStatusToLabel(t.status);
+            const actionHint = readTrimmedStringField(t, "actionHint");
 
             return (
               <article
@@ -120,11 +131,15 @@ export default function SavedPage() {
                 <div className="space-y-2">
                   <div className="flex items-start justify-between gap-3">
                     <div className="space-y-1">
-                      <p className={`text-[11px] font-medium uppercase tracking-[0.16em] ${ui.className}`}>
+                      <p
+                        className={`text-[11px] font-medium uppercase tracking-[0.16em] ${ui.className}`}
+                      >
                         {ui.label}
                       </p>
                       <h2 className="text-sm font-semibold text-neutral-50">{t.name}</h2>
-                      {t.momentumLabel && <p className="text-[11px] text-neutral-500">{t.momentumLabel}</p>}
+                      {t.momentumLabel && (
+                        <p className="text-[11px] text-neutral-500">{t.momentumLabel}</p>
+                      )}
                     </div>
 
                     <span className="rounded-pill bg-black/40 px-2 py-0.5 text-[10px] text-neutral-300">
@@ -135,10 +150,10 @@ export default function SavedPage() {
                   <p className="text-xs text-neutral-300">{t.description}</p>
 
                   {/* Stage 3.9 (optional): show if present on stored trend object */}
-                  {"actionHint" in t && typeof (t as any).actionHint === "string" && (t as any).actionHint.trim() && (
+                  {actionHint && (
                     <p className="text-[11px] text-neutral-400">
                       <span className="text-neutral-500">Next:</span>{" "}
-                      <span className="text-neutral-200">{(t as any).actionHint}</span>
+                      <span className="text-neutral-200">{actionHint}</span>
                     </p>
                   )}
                 </div>

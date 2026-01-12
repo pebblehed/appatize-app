@@ -10,7 +10,7 @@
 // Notes:
 // - This is an in-process memory cache (per server instance).
 // - On Vercel/serverless it may be cold-started or not shared across regions.
-//   That's OK: the goal is *resilience* and *no drift when we do have a cache*.
+//   That's OK: the goal is resilience and no drift when we do have a cache.
 // - Keep this generic: can be reused for other signal sources later.
 //
 // Usage:
@@ -74,8 +74,12 @@ const DEFAULT_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const DEFAULT_MAX_STALE_MS = 24 * 60 * 60 * 1000; // 24 hours
 const DEFAULT_MAX_ENTRIES = 200;
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object";
+}
+
 // Global cache store (per Node process)
-const STORE: Map<string, Map<string, SoftCacheEntry<any>>> = new Map();
+const STORE: Map<string, Map<string, SoftCacheEntry<unknown>>> = new Map();
 
 /**
  * Best-effort deep freeze to prevent accidental mutations that would cause drift.
@@ -93,13 +97,14 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
   try {
     // Freeze children first
     if (Array.isArray(value)) {
-      for (const item of value) deepFreeze(item as any, seen);
-    } else {
+      for (const item of value) deepFreeze(item, seen);
+    } else if (isObject(value)) {
       // Only iterate own enumerable properties
-      for (const key of Object.keys(value as any)) {
-        deepFreeze((value as any)[key], seen);
+      for (const key of Object.keys(value)) {
+        deepFreeze(value[key], seen);
       }
     }
+
     Object.freeze(obj);
   } catch {
     // Ignore — this is best effort
@@ -111,19 +116,23 @@ function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
 /**
  * Ensure a namespace map exists and return it.
  */
-function getNamespaceMap(namespace: string): Map<string, SoftCacheEntry<any>> {
+function getNamespaceMap(namespace: string): Map<string, SoftCacheEntry<unknown>> {
   const ns = namespace.trim();
   if (!STORE.has(ns)) STORE.set(ns, new Map());
-  return STORE.get(ns)!;
+  const map = STORE.get(ns);
+  if (!map) {
+    // Extremely defensive; should never happen.
+    const created = new Map<string, SoftCacheEntry<unknown>>();
+    STORE.set(ns, created);
+    return created;
+  }
+  return map;
 }
 
 /**
  * Evict oldest entries if we exceed the maxEntries cap (best-effort, O(n)).
  */
-function enforceCap<T>(
-  map: Map<string, SoftCacheEntry<T>>,
-  maxEntries: number
-) {
+function enforceCap<T>(map: Map<string, SoftCacheEntry<T>>, maxEntries: number) {
   if (map.size <= maxEntries) return;
 
   // Find oldest entries by savedAt
@@ -132,7 +141,9 @@ function enforceCap<T>(
 
   const toRemove = map.size - maxEntries;
   for (let i = 0; i < toRemove; i++) {
-    const [key] = entries[i];
+    const pair = entries[i];
+    if (!pair) continue;
+    const [key] = pair;
     map.delete(key);
   }
 }
@@ -240,7 +251,13 @@ export function getSoftCache<T>(options: Partial<SoftCacheOptions> & { namespace
     /**
      * Optional: quick stats for debugging.
      */
-    stats(): { namespace: string; size: number; ttlMs: number; maxStaleMs: number; maxEntries: number } {
+    stats(): {
+      namespace: string;
+      size: number;
+      ttlMs: number;
+      maxStaleMs: number;
+      maxEntries: number;
+    } {
       return { namespace, size: map.size, ttlMs, maxStaleMs, maxEntries };
     },
   };

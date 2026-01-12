@@ -21,30 +21,28 @@ export type SignalSource =
   | "youtube"
   | "wikipedia"
   | "manual"
-  | "instagram"; // used by mock signals below
+  | "instagram";
 
 /**
  * Raw cultural signal from the outside world.
- * In Stage 2+, external APIs will construct this shape.
  */
 export interface SignalEvent {
   id: string;
   source: SignalSource;
-  label: string; // e.g. "Street POV micro-vlogs"
-  score: number; // simple numeric “momentum” score (0–100+)
-  volume?: number; // optional relative volume
-  tags: string[]; // platform, format, behaviours, etc.
-  timestamp: string; // ISO date string
+  label: string;
+  score: number;
+  volume?: number;
+  tags: string[];
+  timestamp: string;
 }
 
 /**
  * Signals clustered into a trend concept.
- * Multiple SignalEvents may support a single Trend.
  */
 export interface TrendSignal {
   id: string;
-  key: string; // canonical key, e.g. "street_pov_micro_vlogs"
-  label: string; // human-readable trend name
+  key: string;
+  label: string;
   description: string;
   signals: SignalEvent[];
   category?: string;
@@ -52,33 +50,91 @@ export interface TrendSignal {
 
 /**
  * Evidence primitives (deterministic, non-generative).
- * These are computed from already-fetched signal timestamps and sources.
  */
 type Evidence = {
   signalCount: number;
+
+  /**
+   * NOTE (Stage D.6 wiring reality):
+   * Until we have multi-platform adapters, platform sourceCount will be 1 for Reddit-only.
+   * For decision surfacing, we need a breadth proxy that is still truth-only.
+   *
+   * We therefore define evidence.sourceCount as "distinct contributing sources within available input scope".
+   * In Reddit-only scope, that means distinct subreddits participating in the cluster.
+   */
   sourceCount: number;
+
+  // Optional extra clarity fields (do not break UI; safe additive)
+  platformSourceCount?: number;
+  subredditCount?: number;
+
   firstSeenAt?: string;
   lastConfirmedAt?: string;
   ageHours?: number;
   recencyMins?: number;
   velocityPerHour?: number;
+  momentQualityScore?: number;
 };
+
+/**
+ * Extract subreddit tags like "subreddit:fragrance"
+ */
+function extractSubredditsFromTags(tags: string[]): string[] {
+  return (tags || [])
+    .filter((t) => typeof t === "string" && t.startsWith("subreddit:"))
+    .map((t) => t.toLowerCase().trim())
+    .filter(Boolean);
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+/**
+ * Deterministic quality proxy (0–100) derived ONLY from existing primitives:
+ * - avgScore (ups/score)
+ * - totalVolume (comments)
+ * - velocityPerHour (if available)
+ *
+ * Purpose: give decision surfacing something stronger than pure counts when evidence is genuinely hot,
+ * without inventing any intelligence.
+ */
+function computeMomentQualityScore(args: {
+  avgScore: number;
+  totalVolume: number;
+  velocityPerHour?: number;
+}): number {
+  const { avgScore, totalVolume, velocityPerHour } = args;
+
+  // Score: squash into 0..100 (Reddit ups can be large; cap deterministically)
+  const scoreComponent = clamp(avgScore, 0, 300) / 3; // 0..100
+
+  // Volume: log squash (comments), 0..~100
+  const vol = Math.max(0, totalVolume);
+  const volumeComponent = clamp(Math.log10(1 + vol) * 40, 0, 100); // ~0..100
+
+  // Velocity: signals per hour, also squashed (clusters can be small)
+  const v = velocityPerHour != null ? Math.max(0, velocityPerHour) : 0;
+  const velocityComponent = clamp(v * 15, 0, 100);
+
+  // Weighted blend (deterministic)
+  const blended = scoreComponent * 0.55 + volumeComponent * 0.3 + velocityComponent * 0.15;
+
+  // Keep stable 2dp → integer-ish feel (but still number)
+  return Number(blended.toFixed(2));
+}
 
 /**
  * Trend interpreter:
  * TrendSignal[] → Trend[]
- *
- * The Trend type matches what BriefContext and the UI already use.
  */
 export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
   return trendSignals.map<Trend>((ts) => {
-    // --- Aggregate signal measures (deterministic) ---
     const totalScore = ts.signals.reduce((sum, s) => sum + s.score, 0);
     const avgScore = ts.signals.length ? totalScore / ts.signals.length : 0;
 
     const totalVolume = ts.signals.reduce((sum, s) => sum + (s.volume ?? 0), 0);
 
-    // --- Status classification (deterministic thresholds; no guessing) ---
     let status: TrendStatus;
     let momentumLabel: string;
 
@@ -95,18 +151,23 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
 
     const allTags = ts.signals.flatMap((s) => s.tags);
 
-    // Market surfacing (deterministic):
     const marketLabel = deriveMarketLabelFromTags(allTags);
     const category = mergeCategoryWithMarket(ts.category, marketLabel);
 
-    // ---- Stage-3.2: Evidence primitives (deterministic) ----
+    // ---- Evidence primitives ----
     const items = ts.signals;
 
     const signalCount = items.length;
 
-    const sourceCount = new Set(
-      items.map((it) => it.source).filter(Boolean)
-    ).size;
+    // Platform count (future-proof, stays 1 for Reddit-only)
+    const platformSourceCount = new Set(items.map((it) => it.source).filter(Boolean)).size;
+
+    // Subreddit breadth proxy (truth-only within Reddit scope)
+    const subredditCount = new Set(items.flatMap((it) => extractSubredditsFromTags(it.tags || [])))
+      .size;
+
+    // Stage D.6: breadth proxy
+    const sourceCount = Math.max(1, platformSourceCount, subredditCount);
 
     const timestamps = items
       .map((it) => it.timestamp)
@@ -115,15 +176,11 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
       .filter((ms) => Number.isFinite(ms))
       .sort((a, b) => a - b);
 
-    const firstSeenAt =
-      timestamps.length > 0 ? new Date(timestamps[0]).toISOString() : undefined;
+    const firstSeenAt = timestamps.length > 0 ? new Date(timestamps[0]).toISOString() : undefined;
 
     const lastConfirmedAt =
-      timestamps.length > 0
-        ? new Date(timestamps[timestamps.length - 1]).toISOString()
-        : undefined;
+      timestamps.length > 0 ? new Date(timestamps[timestamps.length - 1]).toISOString() : undefined;
 
-    // Derived evidence fields (still deterministic; just math over timestamps)
     const nowMs = Date.now();
 
     const ageHours =
@@ -136,8 +193,7 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
         ? Math.max(0, (nowMs - Date.parse(lastConfirmedAt)) / (1000 * 60))
         : undefined;
 
-    // Velocity: how many signals per hour since first seen (guardrailed)
-    // - If ageHours is tiny, avoid exploding values.
+    // Velocity: signals per hour since first seen (guardrailed)
     const velocityPerHour =
       ageHours != null
         ? ageHours >= 0.25
@@ -145,24 +201,35 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
           : undefined
         : undefined;
 
+    const momentQualityScore = computeMomentQualityScore({
+      avgScore,
+      totalVolume,
+      velocityPerHour,
+    });
+
     const evidence: Evidence = {
       signalCount,
       sourceCount,
+      platformSourceCount,
+      subredditCount,
       firstSeenAt,
       lastConfirmedAt,
       ageHours: ageHours != null ? Number(ageHours.toFixed(2)) : undefined,
       recencyMins: recencyMins != null ? Number(recencyMins.toFixed(2)) : undefined,
       velocityPerHour,
+      momentQualityScore,
     };
 
-    // ---- Stage-3.2: Decision surfacing (deterministic) ----
-    // NOTE: decision semantics remain untouched. We are only attaching evidence
-    // so the UI Evidence drawer can display the exact primitives used.
+    // Decision surfacing (same primitives + deterministic quality proxy)
     const decision = surfaceDecision({
       signalCount,
       sourceCount,
       firstSeenAt,
       lastConfirmedAt,
+
+      // Provide both keys for total compatibility
+      momentQualityScore,
+      qualityScore: momentQualityScore,
     });
 
     return {
@@ -170,22 +237,14 @@ export function interpretTrendSignals(trendSignals: TrendSignal[]): Trend[] {
       status,
       name: ts.label,
       description: ts.description,
-
-      // derive format from *all* signal tags
       formatLabel: deriveFormatLabelFromTags(allTags),
-
       momentumLabel,
       category,
 
-      // Debug fields (for validating peaking/emerging logic)
       debugScore: totalScore,
       debugVolume: totalVolume,
 
-      // Stage-3.2 decision surface
       ...decision,
-
-      // Stage-3.4+ evidence drawer support (read-only, deterministic)
-      // This is the missing piece causing UI "—" values.
       evidence,
     };
   });
@@ -251,7 +310,6 @@ function mergeCategoryWithMarket(
 
 /**
  * Stage 1 mock signals — realistic shape matching the future real adapters.
- * NOTE: These are not referenced by live routes once mock is removed from UI.
  */
 export function getMockTrendSignals(): TrendSignal[] {
   const now = new Date().toISOString();
@@ -290,83 +348,6 @@ export function getMockTrendSignals(): TrendSignal[] {
           score: 70,
           source: "instagram",
           tags: ["instagram", "short-form", "reels", "pov"],
-        }),
-        s({
-          label: "TikTok: 'POV: you’re in my city' template",
-          score: 82,
-          source: "manual",
-          tags: ["tiktok", "short-form", "template", "pov"],
-        }),
-        s({
-          label: "YouTube Shorts: silent walk + ambient audio",
-          score: 66,
-          source: "youtube",
-          tags: ["youtube_shorts", "short-form", "ambient", "pov"],
-        }),
-        s({
-          label: "IG Reels: 'street interview + POV cutaways'",
-          score: 74,
-          source: "instagram",
-          tags: ["instagram", "short-form", "reels", "pov", "street"],
-        }),
-        s({
-          label: "TikTok: 'night walk POV' variation",
-          score: 77,
-          source: "manual",
-          tags: ["tiktok", "short-form", "night", "pov"],
-        }),
-        s({
-          label: "YouTube: 'POV walk' compilation shorts",
-          score: 63,
-          source: "youtube",
-          tags: ["youtube_shorts", "short-form", "compilation", "pov"],
-        }),
-        s({
-          label: "IG Reels: POV + inner monologue voiceover",
-          score: 76,
-          source: "instagram",
-          tags: ["instagram", "short-form", "voiceover", "pov"],
-        }),
-      ],
-    },
-    {
-      id: "trend-day-in-the-life",
-      key: "day_in_the_life_work_content",
-      label: "Day-in-the-life work content",
-      description:
-        "Relatable behind-the-scenes content showing how people actually work, live and create.",
-      category: "Work-life",
-      signals: [
-        s({
-          label: "TikTok workday vlogs",
-          score: 72,
-          tags: ["tiktok", "short-form", "vlog"],
-        }),
-        s({
-          label: "LinkedIn ‘a day in my role’ posts",
-          score: 55,
-          tags: ["linkedin", "thread", "work"],
-        }),
-      ],
-    },
-    {
-      id: "trend-expectation-vs-reality",
-      key: "expectation_vs_reality_memes",
-      label: "Expectation vs reality memes",
-      description:
-        "Evergreen meme format contrasting ideal vs actual outcomes, constantly remixed.",
-      category: "Meme format",
-      signals: [
-        s({
-          label: "X text + image macro threads",
-          score: 40,
-          tags: ["x", "thread", "meme"],
-        }),
-        s({
-          label: "IG carousel ‘expectation vs reality’",
-          score: 48,
-          source: "instagram",
-          tags: ["instagram", "carousel", "meme"],
         }),
       ],
     },

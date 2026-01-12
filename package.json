@@ -4,13 +4,20 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "build": "next build",
+    "lint": "eslint .",
+    "lint:dev": "eslint . --rule \"react-hooks/set-state-in-effect:warn\" --rule \"@typescript-eslint/no-explicit-any:warn\" --rule \"react-hooks/exhaustive-deps:warn\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "npm run lint:dev",
+    "check:ci": "npm run typecheck && npm run lint && npm run build",
+    "format": "prettier . --write",
+    "format:check": "prettier . --check",
+    "prepare": "husky"
   },
   "dependencies": {
     "@heroicons/react": "^2.2.0",
-    "next": "16.0.3",
+    "next": "^16.0.8",
     "openai": "^6.9.1",
     "react": "19.2.0",
     "react-dom": "19.2.0"
@@ -22,8 +29,17 @@
     "@types/react-dom": "^19",
     "baseline-browser-mapping": "^2.8.32",
     "eslint": "^9",
-    "eslint-config-next": "16.0.3",
+    "eslint-config-next": "^16.0.8",
+    "eslint-config-prettier": "^10.1.8",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.1.6",
+    "prettier": "^3.6.2",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx,json,css,md}": [
+      "prettier --write"
+    ]
   }
 }

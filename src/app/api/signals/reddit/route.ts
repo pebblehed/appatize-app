@@ -1,414 +1,402 @@
-// src/app/api/signals/reddit/route.ts
+// src/app/api/trends/live/route.ts
 //
-// Stage 2: Real-signal endpoint (Reddit).
-// GET /api/signals/reddit?pack=fragrance&limit=25
-// Also supports legacy query params:
-//   - subs=socialmedia,marketing
-//   - subreddits=socialmedia,marketing
+// Live Trends API (deterministic, never-500)
 //
-// Returns Trend[] interpreted from live Reddit topics.
+// Purpose:
+// - Surface Trend[] for the UI from live signal sources.
+// - Stage 3+ logic (decision surfacing etc.) may be embedded upstream.
+//   This route only fills missing deterministic primitives needed by the UI.
+//
+// Current wiring (minimal):
+// - Uses the existing Stage 2 Reddit endpoint as the live signal source:
+//   GET /api/signals/reddit?pack=fragrance&limit=25
 //
 // Rules:
 // - Never 500
 // - Safe empty states
-// - Backwards compatible params to prevent drift
+// - Do NOT fake intelligence: if upstream is unavailable, return [] with status=unavailable.
 //
-// Stage 3.7 — Reddit resilience (soft cache, no drift)
-//
-// Anti-throttle hardening (deterministic, no fake intelligence):
-// - Soft cache per (pack/subreddits + limit) to reduce Reddit hits
-// - If live fetch fails, serve last-known-good payload (stale-allowed window)
-// - Never mutate cached payloads (prevents drift)
-//
-// Telemetry (best-effort, deterministic):
-// - We probe each subreddit once to report raw counts + availability.
-// - We then call the engine to apply hygiene + mapping.
-// - "dropped" is estimated as rawCount - keptCount (keptCount = trends.length).
-//   This should be close because the adapter is 1-post → 1-trend after hygiene,
-//   but counts can differ slightly because the probe + engine fetch are separate calls.
-//
-// Stage 10 — Stop rule / kill-switch discipline (deterministic)
-// - If SIGNALS_DISABLED is enabled, return an honest empty state.
-// - No upstream calls, no cache reads, no probes, no engine fetch.
-// - Never 500.
+// IMPORTANT HOTFIX (loop prevention):
+// - Do NOT return volatile "time-now" derived fields (ageHours, recencyMins, velocityPerHour).
+//   Those change every request and can trigger client refetch loops.
+// - Keep stable primitives only: counts + timestamps.
 
 import { NextResponse } from "next/server";
-import { fetchRedditTrends } from "@/engine/reddit";
-import { getSoftCache, makeCacheKey } from "@/lib/cache/softCache";
 
 export const dynamic = "force-dynamic";
 
-const DEFAULT_SUBREDDITS = ["socialmedia", "marketing"];
+type Status = "ok" | "unavailable";
 
-/**
- * Curated subreddit packs (discovery lenses).
- * Deterministic input selection only — not intelligence.
- */
-const PACKS: Record<string, string[]> = {
-  // Core defaults
-  social: ["socialmedia", "marketing"],
-  entrepreneur: ["Entrepreneur"],
+/** Shape we expect FROM the upstream /api/signals/reddit route (tolerant). */
+type UpstreamTrendsResponse = {
+  source?: string;
+  mode?: string;
 
-  // Market packs
-  fragrance: ["fragrance", "perfumes", "Colognes", "FemFragLab"],
+  // Stage 2 may omit status entirely.
+  status?: Status;
 
-  // NEW
-  beauty: ["SkincareAddiction", "MakeupAddiction", "AsianBeauty", "beauty"],
+  count?: number;
+  trends?: unknown[];
 
-  // NEW
-  fashion: ["fashion", "streetwear", "malefashionadvice", "femalefashionadvice"],
+  message?: string;
+  telemetry?: unknown;
+  debug?: unknown;
 };
 
-/**
- * Stage 3.7 soft-cache policy
- * - ttlMs: how long a value is considered "fresh"
- * - maxStaleMs: how long we will serve last-known-good if live fails
- */
-const SOFT_CACHE_TTL_MS = 90_000; // 90s: calms bursts, still "live-ish"
-const SOFT_CACHE_MAX_STALE_MS = 24 * 60 * 60 * 1000; // 24h: resilience fallback
+/** Shape we return FROM this /api/trends/live route (stable contract). */
+type LiveApiResponse = {
+  source: "live";
+  status: Status;
+  count: number;
+  trends: unknown[];
+  message?: string;
+  debug?: unknown;
+};
 
-// Namespace isolated for this route
-const redditCache = getSoftCache<any>({
-  namespace: "reddit-signals",
-  ttlMs: SOFT_CACHE_TTL_MS,
-  maxStaleMs: SOFT_CACHE_MAX_STALE_MS,
-});
+type JsonRecord = Record<string, unknown>;
+type EvidenceLike = JsonRecord;
+type TrendLike = JsonRecord;
 
 function parseLimit(raw: string | null, fallback: number) {
   const n = raw ? Number(raw) : NaN;
   if (!Number.isFinite(n) || n <= 0) return fallback;
-  return Math.min(Math.floor(n), 50); // keep sane
+  return Math.min(Math.floor(n), 50);
 }
 
-function parseSubList(raw: string | null) {
-  if (!raw) return [];
-  return raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-type SubredditHealth = {
-  subreddit: string;
-  status: "ok" | "unavailable";
-  httpStatus?: number;
-  rawCount: number; // best-effort count of hot.json children
-  message?: string;
-};
-
-function buildUserAgent(purpose: "health-probe" | "route") {
-  // Small jitter reduces fingerprint throttling; still honest UA string.
-  const jitter = Math.random().toString(36).slice(2, 8);
-  return `Appatize/0.1 (${purpose}) ${jitter}`;
-}
-
-async function probeSubredditHealth(
-  subreddit: string,
-  limit: number
-): Promise<SubredditHealth> {
-  const url = `https://www.reddit.com/r/${subreddit}/hot.json?limit=${limit}`;
-
-  const controller = new AbortController();
-  const timeoutMs = 8000;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
+function getOrigin(request: Request): string {
   try {
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": buildUserAgent("health-probe"),
-      },
-      cache: "no-store",
-      signal: controller.signal,
-    });
-
-    if (!res.ok) {
-      return {
-        subreddit,
-        status: "unavailable",
-        httpStatus: res.status,
-        rawCount: 0,
-        message: `${res.status} ${res.statusText}`,
-      };
-    }
-
-    let json: any;
-    try {
-      json = await res.json();
-    } catch {
-      return {
-        subreddit,
-        status: "unavailable",
-        httpStatus: 200,
-        rawCount: 0,
-        message: "JSON parse failed",
-      };
-    }
-
-    const children: any[] = json?.data?.children ?? [];
-    const rawCount = Array.isArray(children) ? children.length : 0;
-
-    return {
-      subreddit,
-      status: "ok",
-      httpStatus: 200,
-      rawCount,
-    };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return {
-      subreddit,
-      status: "unavailable",
-      rawCount: 0,
-      message: msg,
-    };
-  } finally {
-    clearTimeout(timer);
+    return new URL(request.url).origin;
+  } catch {
+    return "";
   }
 }
 
-function withCacheHeaders(res: NextResponse) {
-  // Soft CDN-style caching to reduce hammering; local soft-cache is still primary resilience.
-  res.headers.set(
-    "Cache-Control",
-    "public, max-age=0, s-maxage=60, stale-while-revalidate=600"
-  );
-  return res;
+async function safeFetchJSON<T>(url: string): Promise<T | null> {
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+function toNumberOrNull(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  return v;
+}
+
+function toIntOrNull(v: unknown): number | null {
+  const n = toNumberOrNull(v);
+  if (n == null) return null;
+  return Math.round(n);
+}
+
+function toISOIfValidDateString(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d.toISOString();
 }
 
 /**
- * Stage 10 — Kill-switch check (deterministic)
- * Accepts: "1", "true", "yes", "on"
+ * Remove volatile fields that drift with "now".
+ * Keep only stable primitives that the UI can safely use.
  */
-function isSignalsDisabled(): boolean {
-  const raw = (process.env.SIGNALS_DISABLED || "").trim().toLowerCase();
-  if (!raw) return false;
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
+function stripVolatileEvidence(e: EvidenceLike): EvidenceLike {
+  if (!e || typeof e !== "object") return e;
+
+  const stable: EvidenceLike = {};
+
+  // stable counts
+  if (typeof e.signalCount === "number") stable.signalCount = e.signalCount;
+  if (typeof e.sourceCount === "number") stable.sourceCount = e.sourceCount;
+
+  // stable timestamps (raw ISO)
+  if (typeof e.firstSeenAt === "string") stable.firstSeenAt = e.firstSeenAt;
+  if (typeof e.lastConfirmedAt === "string") stable.lastConfirmedAt = e.lastConfirmedAt;
+
+  // keep other stable “counts” (non-time-derived)
+  if (typeof e.platformSourceCount === "number") stable.platformSourceCount = e.platformSourceCount;
+  if (typeof e.subredditCount === "number") stable.subredditCount = e.subredditCount;
+
+  // quality score is stable within the upstream call; keep if present
+  if (typeof e.momentQualityScore === "number") stable.momentQualityScore = e.momentQualityScore;
+
+  return stable;
+}
+
+/**
+ * Attach minimal evidence primitives to a Trend object if missing.
+ */
+function ensureEvidence(trend: unknown): unknown {
+  if (!trend || typeof trend !== "object") return trend;
+
+  const t = trend as TrendLike;
+
+  const existingEvidence =
+    t.evidence && typeof t.evidence === "object" ? (t.evidence as EvidenceLike) : null;
+
+  const firstSeenAtRaw =
+    toISOIfValidDateString(existingEvidence?.firstSeenAt) ??
+    toISOIfValidDateString(t.firstSeenAt) ??
+    toISOIfValidDateString(t.createdAt) ??
+    toISOIfValidDateString(t.publishedAt) ??
+    undefined;
+
+  const lastConfirmedAtRaw =
+    toISOIfValidDateString(existingEvidence?.lastConfirmedAt) ??
+    toISOIfValidDateString(t.lastConfirmedAt) ??
+    toISOIfValidDateString(t.updatedAt) ??
+    toISOIfValidDateString(t.lastSeenAt) ??
+    firstSeenAtRaw;
+
+  const signalCountUpstream =
+    toIntOrNull(existingEvidence?.signalCount) ??
+    toIntOrNull(t.signalCount) ??
+    toIntOrNull(t.debugSignalCount) ??
+    null;
+
+  const sourceCountUpstream =
+    toIntOrNull(existingEvidence?.sourceCount) ??
+    toIntOrNull(t.sourceCount) ??
+    toIntOrNull(t.debugSourceCount) ??
+    null;
+
+  if (existingEvidence) {
+    const merged = {
+      ...existingEvidence,
+      signalCount: signalCountUpstream ?? existingEvidence.signalCount ?? 1,
+      sourceCount: sourceCountUpstream ?? existingEvidence.sourceCount ?? 1,
+      firstSeenAt: existingEvidence.firstSeenAt ?? firstSeenAtRaw,
+      lastConfirmedAt: existingEvidence.lastConfirmedAt ?? lastConfirmedAtRaw,
+    };
+
+    return { ...t, evidence: stripVolatileEvidence(merged) };
+  }
+
+  const created = {
+    signalCount: signalCountUpstream ?? 1,
+    sourceCount: sourceCountUpstream ?? 1,
+    firstSeenAt: firstSeenAtRaw,
+    lastConfirmedAt: lastConfirmedAtRaw,
+  };
+
+  return { ...t, evidence: stripVolatileEvidence(created) };
+}
+
+/**
+ * Stage 3.x — Multi-source truth guard (deterministic)
+ */
+function enforceMultiSourceTruth(trend: unknown): unknown {
+  if (!trend || typeof trend !== "object") return trend;
+
+  const t = trend as TrendLike;
+
+  const decisionState = typeof t.decisionState === "string" ? t.decisionState.toUpperCase() : null;
+
+  if (decisionState !== "ACT") return t;
+
+  const evidence =
+    t.evidence && typeof t.evidence === "object" ? (t.evidence as EvidenceLike) : null;
+
+  const sourceCount =
+    typeof evidence?.sourceCount === "number" && Number.isFinite(evidence.sourceCount)
+      ? evidence.sourceCount
+      : null;
+
+  if (sourceCount == null || sourceCount < 2) {
+    return {
+      ...t,
+      decisionState: "WAIT",
+      decisionRationale:
+        "Corroboration not yet proven (single-source live feed); hold for multi-source confirmation before acting.",
+    };
+  }
+
+  return t;
+}
+
+/**
+ * Stage 3.8 — Deterministic "Why this matters" (no time-derived values)
+ */
+function ensureWhyThisMatters(trend: unknown): unknown {
+  if (!trend || typeof trend !== "object") return trend;
+
+  const t = trend as TrendLike;
+
+  if (typeof t.whyThisMatters === "string" && t.whyThisMatters.trim().length > 0) {
+    return t;
+  }
+
+  const evidence =
+    t.evidence && typeof t.evidence === "object" ? (t.evidence as EvidenceLike) : null;
+
+  const signalCount =
+    typeof evidence?.signalCount === "number" && Number.isFinite(evidence.signalCount)
+      ? evidence.signalCount
+      : null;
+
+  const sourceCount =
+    typeof evidence?.sourceCount === "number" && Number.isFinite(evidence.sourceCount)
+      ? evidence.sourceCount
+      : null;
+
+  const parts: string[] = [];
+
+  if (signalCount != null && sourceCount != null) {
+    parts.push(
+      `${signalCount} signal${signalCount === 1 ? "" : "s"} from ${sourceCount} source${
+        sourceCount === 1 ? "" : "s"
+      }`
+    );
+  } else if (signalCount != null) {
+    parts.push(`${signalCount} signal${signalCount === 1 ? "" : "s"}`);
+  } else if (sourceCount != null) {
+    parts.push(`${sourceCount} source${sourceCount === 1 ? "" : "s"}`);
+  } else {
+    parts.push("Evidence available");
+  }
+
+  const sentence1 = `${parts.join(" ")}.`;
+
+  const decisionState = typeof t.decisionState === "string" ? t.decisionState.toUpperCase() : null;
+  const signalStrength =
+    typeof t.signalStrength === "string" ? t.signalStrength.toUpperCase() : null;
+
+  let sentence2: string | null = null;
+
+  if (decisionState === "ACT") sentence2 = "Enough evidence to responsibly move now.";
+  else if (decisionState === "WAIT") {
+    sentence2 =
+      signalStrength === "WEAK"
+        ? "Not enough density/breadth yet to act responsibly."
+        : "Hold for confirmation before acting.";
+  } else if (decisionState === "REFRESH") {
+    sentence2 = "Not enough confirmed evidence yet — refresh for confirmation.";
+  }
+
+  return { ...t, whyThisMatters: sentence2 ? `${sentence1} ${sentence2}` : sentence1 };
+}
+
+/**
+ * Stage 3.9 — Deterministic "Minimal action hint"
+ */
+function ensureActionHint(trend: unknown): unknown {
+  if (!trend || typeof trend !== "object") return trend;
+
+  const t = trend as TrendLike;
+
+  if (typeof t.actionHint === "string" && t.actionHint.trim().length > 0) {
+    return t;
+  }
+
+  const decisionState = typeof t.decisionState === "string" ? t.decisionState.toUpperCase() : null;
+
+  let actionHint = "Track for another signal cycle.";
+  if (decisionState === "ACT") actionHint = "Worth turning into a brief now.";
+  if (decisionState === "REFRESH") actionHint = "Recheck shortly for movement.";
+
+  return { ...t, actionHint };
 }
 
 export async function GET(request: Request) {
-  // Stage 10: hard stop at the top (no upstream calls, no cache reads/writes)
-  if (isSignalsDisabled()) {
-    const payload = {
-      source: "reddit",
-      mode: "disabled",
-      status: "unavailable" as const,
-      pack: null,
-      subreddits: [] as string[],
-      limit: 0,
-      telemetry: {
-        rawCount: 0,
-        keptCount: 0,
-        estimatedDropped: 0,
-        dropReasons: {
-          structural_noise: null,
-          meta_post: null,
-          other: 0,
-          note: "Signals disabled by kill-switch (SIGNALS_DISABLED).",
-        },
-        subredditHealth: [] as SubredditHealth[],
-        cache: {
-          enabled: false,
-          policy: "soft-cache" as const,
-          ttlMs: SOFT_CACHE_TTL_MS,
-          maxStaleMs: SOFT_CACHE_MAX_STALE_MS,
-        },
-      },
-      count: 0,
-      trends: [],
-      message: "Signals are temporarily disabled.",
-    };
+  const origin = getOrigin(request);
 
-    const res = NextResponse.json(payload, { status: 200 });
-    res.headers.set("X-Kill-Switch", "ON");
-    // Do not cache a disabled response.
-    res.headers.set("Cache-Control", "no-store");
-    return res;
-  }
-
-  // We never 500 — we always return a safe payload.
   try {
     const { searchParams } = new URL(request.url);
 
-    // 1) limit
-    const limit = parseLimit(searchParams.get("limit"), 10);
+    const pack = (searchParams.get("pack") || "fragrance").trim().toLowerCase();
+    const limit = parseLimit(searchParams.get("limit"), 25);
 
-    // 2) pack (preferred)
-    const packRaw = (searchParams.get("pack") || "").trim().toLowerCase();
-    const pack = packRaw.length > 0 ? packRaw : null;
+    const url = origin
+      ? `${origin}/api/signals/reddit?pack=${encodeURIComponent(pack)}&limit=${limit}`
+      : `/api/signals/reddit?pack=${encodeURIComponent(pack)}&limit=${limit}`;
 
-    // 3) legacy params
-    const subsParam = searchParams.get("subs");
-    const subredditsParam = searchParams.get("subreddits");
+    const upstream = await safeFetchJSON<UpstreamTrendsResponse>(url);
 
-    let subreddits: string[] = [];
-
-    if (pack && PACKS[pack]) {
-      subreddits = PACKS[pack];
-    } else {
-      // Use whichever legacy param exists, otherwise fallback
-      const fromSubs = parseSubList(subsParam);
-      const fromSubreddits = parseSubList(subredditsParam);
-
-      subreddits =
-        fromSubs.length > 0
-          ? fromSubs
-          : fromSubreddits.length > 0
-          ? fromSubreddits
-          : DEFAULT_SUBREDDITS;
+    // --- Explicit narrowing (kills "possibly null" squiggles) ---
+    if (!upstream) {
+      const payload: LiveApiResponse = {
+        source: "live",
+        status: "unavailable",
+        count: 0,
+        trends: [],
+        message: "Live source unavailable right now (reddit).",
+        debug: { pack, limit, upstream: null },
+      };
+      return NextResponse.json(payload, { status: 200 });
     }
 
-    // --- Stage 3.7: stable cache key (deterministic) ---
-    const cacheKey = makeCacheKey("reddit", {
-      pack: pack ?? "none",
-      subs: subreddits,
-      limit,
-    });
-
-    // --- Stage 3.7: short-circuit if fresh cache exists (reduces Reddit hits) ---
-    const fresh = redditCache.get(cacheKey);
-    if (fresh?.meta?.isFresh) {
-      const res = NextResponse.json(fresh.data);
-      // Do NOT mutate the payload (no drift). Use headers for observability.
-      res.headers.set("X-Soft-Cache", "HIT");
-      res.headers.set("X-Soft-Cache-AgeMs", String(fresh.meta.ageMs));
-      return withCacheHeaders(res);
-    }
-
-    // --- Best-effort telemetry probe (deterministic; never throws) ---
-    const health = await Promise.all(
-      subreddits.map((s) => probeSubredditHealth(s, limit))
-    );
-
-    const rawCount = health.reduce((sum, h) => sum + (h.rawCount || 0), 0);
-
-    // Engine fetch (applies hygiene + market tagging + mapping)
-    const trends = await fetchRedditTrends(subreddits, limit);
-
-    const keptCount = trends.length;
-    const estimatedDropped = Math.max(0, rawCount - keptCount);
-
-    // Simple drop reason buckets (best-effort only).
-    // We don't duplicate the engine's exact internal reasons in this route.
-    const dropReasons = {
-      structural_noise: null as number | null,
-      meta_post: null as number | null,
-      other: estimatedDropped,
-      note:
-        "Route reports best-effort drop counts. Exact per-reason counts live inside the adapter. If you want exact buckets, we can export adapter debug safely.",
-    };
-
-    const payload = {
-      source: "reddit",
-      mode: "live",
-      status: "ok" as const,
-      pack,
-      subreddits,
-      limit,
-
-      // Telemetry
-      telemetry: {
-        rawCount,
-        keptCount,
-        estimatedDropped,
-        dropReasons,
-        subredditHealth: health,
-        cache: {
-          enabled: true,
-          policy: "soft-cache" as const,
-          ttlMs: SOFT_CACHE_TTL_MS,
-          maxStaleMs: SOFT_CACHE_MAX_STALE_MS,
-          key: cacheKey,
+    if (upstream.status && upstream.status !== "ok") {
+      const payload: LiveApiResponse = {
+        source: "live",
+        status: "unavailable",
+        count: 0,
+        trends: [],
+        message: upstream.message ?? "Live source unavailable right now (reddit).",
+        debug: {
+          pack,
+          limit,
+          upstream: { source: upstream.source ?? "unknown", status: upstream.status },
         },
-      },
+      };
+      return NextResponse.json(payload, { status: 200 });
+    }
 
+    if (!Array.isArray(upstream.trends)) {
+      const payload: LiveApiResponse = {
+        source: "live",
+        status: "unavailable",
+        count: 0,
+        trends: [],
+        message: upstream.message ?? "Live source returned no trends.",
+        debug: {
+          pack,
+          limit,
+          upstream: { source: upstream.source ?? "unknown", status: upstream.status },
+        },
+      };
+      return NextResponse.json(payload, { status: 200 });
+    }
+
+    // From here on: upstream is non-null AND has trends array.
+    const rawTrends = upstream.trends;
+
+    const trends = rawTrends
+      .map(ensureEvidence)
+      .map(enforceMultiSourceTruth)
+      .map(ensureWhyThisMatters)
+      .map(ensureActionHint);
+
+    const okPayload: LiveApiResponse = {
+      source: "live",
+      status: "ok",
       count: trends.length,
       trends,
+      debug: {
+        pack,
+        limit,
+        upstreamSource: upstream.source ?? "unknown",
+        telemetry: upstream.telemetry ?? null,
+        corroborationMode: "single-source (reddit-only)",
+        note: "Volatile time-derived fields stripped to prevent client refetch loops.",
+        upstreamStatus: upstream.status, // possibly undefined; truth-only
+      },
     };
 
-    // Stage 3.7: cache only successful payloads (last-known-good)
-    redditCache.set(cacheKey, payload);
-
-    const res = NextResponse.json(payload);
-    res.headers.set("X-Soft-Cache", "MISS");
-    return withCacheHeaders(res);
+    return NextResponse.json(okPayload, { status: 200 });
   } catch (err) {
-    console.error("[RedditRoute] Error fetching trends:", err);
+    console.error("[/api/trends/live] error:", err);
 
-    // Stage 3.7: if live fails, serve last-known-good (stale allowed)
-    try {
-      const { searchParams } = new URL(request.url);
-      const limit = parseLimit(searchParams.get("limit"), 10);
-
-      const packRaw = (searchParams.get("pack") || "").trim().toLowerCase();
-      const pack = packRaw.length > 0 ? packRaw : null;
-
-      const subsParam = searchParams.get("subs");
-      const subredditsParam = searchParams.get("subreddits");
-
-      let subreddits: string[] = [];
-      if (pack && PACKS[pack]) {
-        subreddits = PACKS[pack];
-      } else {
-        const fromSubs = parseSubList(subsParam);
-        const fromSubreddits = parseSubList(subredditsParam);
-        subreddits =
-          fromSubs.length > 0
-            ? fromSubs
-            : fromSubreddits.length > 0
-            ? fromSubreddits
-            : DEFAULT_SUBREDDITS;
-      }
-
-      const cacheKey = makeCacheKey("reddit", {
-        pack: pack ?? "none",
-        subs: subreddits,
-        limit,
-      });
-
-      const cached = redditCache.get(cacheKey);
-      if (cached && (cached.meta.isFresh || cached.meta.isStale)) {
-        const res = NextResponse.json(cached.data);
-        res.headers.set("X-Soft-Cache", "STALE");
-        res.headers.set("X-Soft-Cache-AgeMs", String(cached.meta.ageMs));
-        return withCacheHeaders(res);
-      }
-    } catch {
-      // ignore — fall through to safe empty payload
-    }
-
-    // Never 500 — safe empty state
-    const payload = {
-      source: "reddit",
-      mode: "live",
-      status: "unavailable" as const,
-      pack: null,
-      subreddits: [],
-      limit: 0,
-      telemetry: {
-        rawCount: 0,
-        keptCount: 0,
-        estimatedDropped: 0,
-        dropReasons: {
-          structural_noise: null,
-          meta_post: null,
-          other: 0,
-          note: "Unavailable.",
-        },
-        subredditHealth: [] as SubredditHealth[],
-        cache: {
-          enabled: true,
-          policy: "soft-cache" as const,
-          ttlMs: SOFT_CACHE_TTL_MS,
-          maxStaleMs: SOFT_CACHE_MAX_STALE_MS,
-        },
-      },
+    const payload: LiveApiResponse = {
+      source: "live",
+      status: "unavailable",
       count: 0,
       trends: [],
-      message: "Failed to fetch Reddit trends right now.",
+      message: "Unable to build live trends right now.",
     };
 
-    const res = NextResponse.json(payload);
-    res.headers.set("X-Soft-Cache", "MISS");
-    return withCacheHeaders(res);
+    return NextResponse.json(payload, { status: 200 });
   }
 }

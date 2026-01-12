@@ -1,11 +1,9 @@
 // src/app/scripts/page.tsx
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useBriefContext } from "@/context/BriefContext";
-import VariantTabs, {
-  ScriptVariant,
-} from "@/components/variant/VariantsTabs";
+import VariantTabs, { ScriptVariant } from "@/components/variant/VariantsTabs";
 import ScriptOutput from "./ScriptOutput";
 import { cleanText } from "@/engine/cleanText";
 
@@ -16,22 +14,56 @@ type CulturalInsight = {
   creativePrinciple?: string;
 };
 
+type GenerateResponse = {
+  variants: ScriptVariant[];
+  cultural?: CulturalInsight | null;
+};
+
+function isAbortError(err: unknown): boolean {
+  return (
+    (err instanceof DOMException && err.name === "AbortError") ||
+    (typeof err === "object" &&
+      err !== null &&
+      "name" in err &&
+      (err as { name?: unknown }).name === "AbortError")
+  );
+}
+
+function clampScore(score: unknown): number | undefined {
+  if (typeof score !== "number" || Number.isNaN(score)) return undefined;
+  return Math.max(0, Math.min(10, score));
+}
+
 export default function ScriptsPage() {
   const { activeBrief } = useBriefContext();
 
   const [variants, setVariants] = useState<ScriptVariant[]>([]);
   const [activeVariantId, setActiveVariantId] = useState<string | null>(null);
-  const [recommendedVariantId, setRecommendedVariantId] = useState<
-    string | null
-  >(null);
-  const [culturalInsight, setCulturalInsight] = useState<
-    CulturalInsight | null
-  >(null);
+  const [recommendedVariantId, setRecommendedVariantId] = useState<string | null>(null);
+  const [culturalInsight, setCulturalInsight] = useState<CulturalInsight | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  /**
+   * Regen key (deterministic):
+   * Avoid re-generating scripts when the activeBrief object reference changes
+   * but the meaningful inputs did not.
+   */
+  const regenKey = useMemo(() => {
+    if (!activeBrief) return null;
+    return [
+      activeBrief.id,
+      activeBrief.updatedAt,
+      activeBrief.platformOverride ?? "",
+      activeBrief.platformHint ?? "",
+      activeBrief.audienceHint ?? "",
+      activeBrief.formatHint ?? "",
+      activeBrief.outcomeHint ?? "",
+    ].join("|");
+  }, [activeBrief]);
+
   useEffect(() => {
-    if (!activeBrief) {
+    if (!activeBrief || !regenKey) {
       setVariants([]);
       setActiveVariantId(null);
       setRecommendedVariantId(null);
@@ -41,6 +73,7 @@ export default function ScriptsPage() {
     }
 
     let cancelled = false;
+    const controller = new AbortController();
 
     async function generateVariants() {
       setIsLoading(true);
@@ -52,48 +85,46 @@ export default function ScriptsPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ brief: activeBrief }),
+          signal: controller.signal,
         });
 
         if (!res.ok) {
           let apiMessage: string | undefined;
           try {
-            const errJson = await res.json();
-            apiMessage =
-              typeof errJson?.error === "string" ? errJson.error : undefined;
-          } catch {}
+            const errJson: unknown = await res.json();
+            if (
+              errJson &&
+              typeof errJson === "object" &&
+              "error" in errJson &&
+              typeof (errJson as { error?: unknown }).error === "string"
+            ) {
+              apiMessage = (errJson as { error: string }).error;
+            }
+          } catch {
+            // ignore
+          }
 
           if (res.status === 429) {
             throw new Error(
-              apiMessage ??
-                "Rate limit reached. Please wait a few seconds and try again."
+              apiMessage ?? "Rate limit reached. Please wait a few seconds and try again."
             );
           }
 
-          throw new Error(
-            apiMessage ??
-              `Failed to generate variants (status ${res.status}).`
-          );
+          throw new Error(apiMessage ?? `Failed to generate variants (status ${res.status}).`);
         }
 
-        const data = (await res.json()) as {
-          variants: ScriptVariant[];
-          cultural?: CulturalInsight | null;
-        };
+        const data = (await res.json()) as GenerateResponse;
 
         if (cancelled) return;
 
-        const normalized =
-          (data.variants || []).map((v, index) => ({
-            id: v.id ?? `variant-${index + 1}`,
-            label: v.label ?? `Variant ${index + 1}`,
-            body: v.body ?? "",
-            angleName: v.angleName,
-            notes: v.notes,
-            score:
-              typeof v.score === "number" && !Number.isNaN(v.score)
-                ? Math.max(0, Math.min(10, v.score))
-                : undefined,
-          })) ?? [];
+        const normalized: ScriptVariant[] = (data.variants || []).map((v, index) => ({
+          id: v.id ?? `variant-${index + 1}`,
+          label: v.label ?? `Variant ${index + 1}`,
+          body: v.body ?? "",
+          angleName: v.angleName,
+          notes: v.notes,
+          score: clampScore(v.score),
+        }));
 
         let recommended: string | null = null;
         let bestScore = -1;
@@ -105,7 +136,7 @@ export default function ScriptsPage() {
           }
         }
 
-        const withRecommended = normalized.map((v) => ({
+        const withRecommended: ScriptVariant[] = normalized.map((v) => ({
           ...v,
           isRecommended: v.id === recommended,
         }));
@@ -122,7 +153,10 @@ export default function ScriptsPage() {
         }
 
         setCulturalInsight(data.cultural ?? null);
-      } catch (err) {
+      } catch (err: unknown) {
+        // Abort is expected during rapid brief switches; do not show as an error.
+        if (isAbortError(err)) return;
+
         console.error(err);
         if (!cancelled) {
           setVariants([]);
@@ -136,9 +170,7 @@ export default function ScriptsPage() {
           );
         }
       } finally {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
+        if (!cancelled) setIsLoading(false);
       }
     }
 
@@ -146,30 +178,27 @@ export default function ScriptsPage() {
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [activeBrief]);
+  }, [regenKey, activeBrief]);
 
-  const activeVariant =
-    variants.find((v) => v.id === activeVariantId) || null;
+  const activeVariant = variants.find((v) => v.id === activeVariantId) || null;
 
   if (!activeBrief) {
     return (
       <div className="space-y-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-neutral-50">
-            Script Variants
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-neutral-50">Script Variants</h1>
           <p className="text-sm text-neutral-400">
-            Start by creating or selecting a brief. Once a brief is active,
-            Appatize will generate all your script variants in one go.
+            Start by creating or selecting a brief. Once a brief is active, Appatize will generate
+            all your script variants in one go.
           </p>
         </div>
 
         <div className="rounded-xl border border-dashed border-neutral-800 bg-neutral-950/70 p-4">
           <p className="text-sm text-neutral-500">
             No brief selected yet. Go to{" "}
-            <span className="font-medium text-neutral-200">Briefs</span> to
-            create or activate one.
+            <span className="font-medium text-neutral-200">Briefs</span> to create or activate one.
           </p>
         </div>
       </div>
@@ -179,51 +208,37 @@ export default function ScriptsPage() {
   // Hyphen-clean display meta
   const titleText = cleanText(activeBrief.title || "Untitled brief");
 
-  const rawPlatform =
-    activeBrief.platformOverride ||
-    activeBrief.platformHint ||
-    null;
-  const platformText = rawPlatform
-    ? cleanText(String(rawPlatform))
-    : null;
+  const rawPlatform = activeBrief.platformOverride || activeBrief.platformHint || null;
+  const platformText = rawPlatform ? cleanText(String(rawPlatform)) : null;
 
-  const objectiveText = activeBrief.objective
-    ? cleanText(activeBrief.objective)
-    : null;
+  const objectiveText = activeBrief.objective ? cleanText(activeBrief.objective) : null;
 
   return (
     <div className="space-y-4">
       {/* Header */}
       <div className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold tracking-tight text-neutral-50">
-          Script Variants
-        </h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-neutral-50">Script Variants</h1>
         <p className="text-sm text-neutral-400">
-          All variants are generated in one run from your active brief. Flip
-          through them with the tabs, review the angles and scores, and pick
-          the one that hits the moment.
+          All variants are generated in one run from your active brief. Flip through them with the
+          tabs, review the angles and scores, and pick the one that hits the moment.
         </p>
       </div>
 
       {/* Brief meta */}
       <div className="rounded-xl border border-neutral-800 bg-neutral-950/80 p-3 text-xs text-neutral-400 flex flex-wrap justify-between gap-2">
         <div className="space-y-0.5">
-          <p className="font-medium text-neutral-200 line-clamp-1">
-            {titleText}
-          </p>
+          <p className="font-medium text-neutral-200 line-clamp-1">{titleText}</p>
 
           {platformText && (
             <p className="line-clamp-1">
-              Platform:{" "}
-              <span className="text-neutral-200">{platformText}</span>
+              Platform: <span className="text-neutral-200">{platformText}</span>
             </p>
           )}
         </div>
 
         {objectiveText && (
           <p className="max-w-xs text-right line-clamp-2">
-            Objective:{" "}
-            <span className="text-neutral-200">{objectiveText}</span>
+            Objective: <span className="text-neutral-200">{objectiveText}</span>
           </p>
         )}
       </div>
@@ -247,36 +262,28 @@ export default function ScriptsPage() {
 
           {culturalInsight.culturalContext && (
             <p className="text-xs text-neutral-200">
-              <span className="font-semibold text-neutral-100">
-                Cultural context:
-              </span>{" "}
+              <span className="font-semibold text-neutral-100">Cultural context:</span>{" "}
               {culturalInsight.culturalContext}
             </p>
           )}
 
           {culturalInsight.momentInsight && (
             <p className="text-xs text-neutral-200">
-              <span className="font-semibold text-neutral-100">
-                Audience / moment:
-              </span>{" "}
+              <span className="font-semibold text-neutral-100">Audience / moment:</span>{" "}
               {culturalInsight.momentInsight}
             </p>
           )}
 
           {culturalInsight.flowGuidance && (
             <p className="text-xs text-neutral-200">
-              <span className="font-semibold text-neutral-100">
-                Flow guidance:
-              </span>{" "}
+              <span className="font-semibold text-neutral-100">Flow guidance:</span>{" "}
               {culturalInsight.flowGuidance}
             </p>
           )}
 
           {culturalInsight.creativePrinciple && (
             <p className="text-xs text-neutral-200">
-              <span className="font-semibold text-neutral-100">
-                Creative principle:
-              </span>{" "}
+              <span className="font-semibold text-neutral-100">Creative principle:</span>{" "}
               {culturalInsight.creativePrinciple}
             </p>
           )}

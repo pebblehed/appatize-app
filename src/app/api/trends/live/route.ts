@@ -4,7 +4,8 @@
 //
 // Purpose:
 // - Surface Trend[] for the UI from live signal sources.
-// - Stage 3+ logic (decision surfacing etc.) is already embedded in the engine output.
+// - Stage 3+ logic (decision surfacing etc.) may be embedded upstream.
+//   This route only fills missing deterministic primitives needed by the UI.
 //
 // Current wiring (minimal):
 // - Uses the existing Stage 2 Reddit endpoint as the live signal source:
@@ -15,31 +16,80 @@
 // - Safe empty states
 // - Do NOT fake intelligence: if upstream is unavailable, return [] with status=unavailable.
 //
-// Stage 3.5+ UI NOTE:
-// - The UI Evidence drawer expects `trend.evidence` fields.
-// - Upstream Trend objects currently do NOT include evidence primitives,
-//   so we attach a minimal deterministic evidence object here (no extra calls).
-//
-// Stage 3.8 (#6) — Why this matters (deterministic, truth-only)
-// - Attach `whyThisMatters` (1–2 sentences) derived ONLY from existing evidence + decision fields.
-// - No new intelligence, no extra network calls, no LLM, no guessing.
-//
-// Stage 3.9 (#7) — Minimal action hint (deterministic, truth-only)
-// - Attach `actionHint` (one short sentence) derived ONLY from existing decision fields.
-// - No new intelligence, no extra network calls, no LLM, no marketing language.
+// IMPORTANT HOTFIX (loop prevention):
+// - Do NOT return volatile "time-now" derived fields (ageHours, recencyMins, velocityPerHour).
+//   Those change every request and can trigger client refetch loops.
+// - Keep stable primitives only: counts + timestamps.
 
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
-type LiveTrendsResponse = {
-  source: string;
+type Status = "ok" | "unavailable";
+
+/** Shape we expect FROM the upstream /api/signals/reddit route (tolerant). */
+type UpstreamTrendsResponse = {
+  source?: string;
   mode?: string;
-  status: "ok" | "unavailable";
-  count: number;
-  trends: any[];
+
+  // Stage 2 may omit status entirely.
+  status?: Status;
+
+  count?: number;
+  trends?: unknown[];
+
   message?: string;
-  telemetry?: any;
+  telemetry?: unknown;
+  debug?: unknown;
+};
+
+/** Shape we return FROM this /api/trends/live route (stable contract). */
+type LiveApiResponse = {
+  source: "live";
+  status: Status;
+  count: number;
+  trends: unknown[];
+  message?: string;
+  debug?: unknown;
+};
+
+type EvidenceLike = {
+  signalCount?: unknown;
+  sourceCount?: unknown;
+
+  firstSeenAt?: unknown;
+  lastConfirmedAt?: unknown;
+
+  platformSourceCount?: unknown;
+  subredditCount?: unknown;
+
+  momentQualityScore?: unknown;
+
+  // allow unknown extra fields without dropping them
+  [k: string]: unknown;
+};
+
+type TrendLike = {
+  evidence?: unknown;
+  decisionState?: unknown;
+  decisionRationale?: unknown;
+  whyThisMatters?: unknown;
+  actionHint?: unknown;
+  signalStrength?: unknown;
+
+  firstSeenAt?: unknown;
+  lastConfirmedAt?: unknown;
+  createdAt?: unknown;
+  publishedAt?: unknown;
+  updatedAt?: unknown;
+  lastSeenAt?: unknown;
+
+  signalCount?: unknown;
+  sourceCount?: unknown;
+  debugSignalCount?: unknown;
+  debugSourceCount?: unknown;
+
+  [k: string]: unknown;
 };
 
 function parseLimit(raw: string | null, fallback: number) {
@@ -66,73 +116,162 @@ async function safeFetchJSON<T>(url: string): Promise<T | null> {
   }
 }
 
-/**
- * Attach minimal evidence primitives to a Trend object if missing.
- *
- * We do NOT add any new intelligence or make any additional network calls here.
- * We only provide deterministic primitives so the UI Evidence drawer can render:
- * - Density (signalCount)
- * - Breadth (sourceCount)
- *
- * Until upstream includes timestamps, we leave freshness/age/velocity undefined.
- */
-function ensureEvidence(trend: any) {
-  if (!trend || typeof trend !== "object") return trend;
-
-  // If upstream already provides evidence, do not touch it.
-  if (trend.evidence && typeof trend.evidence === "object") return trend;
-
-  // Minimal deterministic defaults:
-  // Current Reddit adapter is effectively 1-post → 1-trend, so:
-  // - density = 1
-  // - breadth = 1
-  const evidence = {
-    signalCount: 1,
-    sourceCount: 1,
-    firstSeenAt: undefined as string | undefined,
-    lastConfirmedAt: undefined as string | undefined,
-    ageHours: undefined as number | undefined,
-    recencyMins: undefined as number | undefined,
-    velocityPerHour: undefined as number | undefined,
-  };
-
-  return {
-    ...trend,
-    evidence,
-  };
+function toNumberOrNull(v: unknown): number | null {
+  if (typeof v !== "number" || !Number.isFinite(v)) return null;
+  return v;
 }
 
-function toFixedSafe(n: unknown, digits: number): string | null {
-  if (typeof n !== "number" || !Number.isFinite(n)) return null;
-  return n.toFixed(digits);
-}
-
-function toIntSafe(n: unknown): number | null {
-  if (typeof n !== "number" || !Number.isFinite(n)) return null;
+function toIntOrNull(v: unknown): number | null {
+  const n = toNumberOrNull(v);
+  if (n == null) return null;
   return Math.round(n);
 }
 
+function toISOIfValidDateString(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d.toISOString();
+}
+
 /**
- * Stage 3.8 — Deterministic "Why this matters"
- * Truth-only text derived from existing evidence + decision fields.
- *
- * Rules:
- * - Never overwrite if upstream already provides whyThisMatters
- * - Never guess missing values: only include what we can prove from fields present
- * - Keep to 1–2 sentences max
+ * Remove volatile fields that drift with "now".
+ * Keep only stable primitives that the UI can safely use.
  */
-function ensureWhyThisMatters(trend: any) {
+function stripVolatileEvidence(e: EvidenceLike): EvidenceLike {
+  if (!e || typeof e !== "object") return e;
+
+  const stable: EvidenceLike = {};
+
+  // stable counts
+  if (typeof e.signalCount === "number") stable.signalCount = e.signalCount;
+  if (typeof e.sourceCount === "number") stable.sourceCount = e.sourceCount;
+
+  // stable timestamps (raw ISO)
+  if (typeof e.firstSeenAt === "string") stable.firstSeenAt = e.firstSeenAt;
+  if (typeof e.lastConfirmedAt === "string") stable.lastConfirmedAt = e.lastConfirmedAt;
+
+  // keep other stable “counts” (non-time-derived)
+  if (typeof e.platformSourceCount === "number") stable.platformSourceCount = e.platformSourceCount;
+  if (typeof e.subredditCount === "number") stable.subredditCount = e.subredditCount;
+
+  // quality score is stable within the upstream call; keep if present
+  if (typeof e.momentQualityScore === "number") stable.momentQualityScore = e.momentQualityScore;
+
+  return stable;
+}
+
+/**
+ * Attach minimal evidence primitives to a Trend object if missing.
+ */
+function ensureEvidence(trend: unknown): unknown {
   if (!trend || typeof trend !== "object") return trend;
 
-  if (
-    typeof trend.whyThisMatters === "string" &&
-    trend.whyThisMatters.trim().length > 0
-  ) {
-    return trend;
+  const t = trend as TrendLike;
+
+  const existingEvidence =
+    t.evidence && typeof t.evidence === "object" ? (t.evidence as EvidenceLike) : null;
+
+  const firstSeenAtRaw =
+    toISOIfValidDateString(existingEvidence?.firstSeenAt) ??
+    toISOIfValidDateString(t.firstSeenAt) ??
+    toISOIfValidDateString(t.createdAt) ??
+    toISOIfValidDateString(t.publishedAt) ??
+    undefined;
+
+  const lastConfirmedAtRaw =
+    toISOIfValidDateString(existingEvidence?.lastConfirmedAt) ??
+    toISOIfValidDateString(t.lastConfirmedAt) ??
+    toISOIfValidDateString(t.updatedAt) ??
+    toISOIfValidDateString(t.lastSeenAt) ??
+    firstSeenAtRaw;
+
+  const signalCountUpstream =
+    toIntOrNull(existingEvidence?.signalCount) ??
+    toIntOrNull(t.signalCount) ??
+    toIntOrNull(t.debugSignalCount) ??
+    null;
+
+  const sourceCountUpstream =
+    toIntOrNull(existingEvidence?.sourceCount) ??
+    toIntOrNull(t.sourceCount) ??
+    toIntOrNull(t.debugSourceCount) ??
+    null;
+
+  if (existingEvidence) {
+    const merged: EvidenceLike = {
+      ...existingEvidence,
+      signalCount: signalCountUpstream ?? existingEvidence.signalCount ?? 1,
+      sourceCount: sourceCountUpstream ?? existingEvidence.sourceCount ?? 1,
+      firstSeenAt:
+        (typeof existingEvidence.firstSeenAt === "string"
+          ? existingEvidence.firstSeenAt
+          : undefined) ?? firstSeenAtRaw,
+      lastConfirmedAt:
+        (typeof existingEvidence.lastConfirmedAt === "string"
+          ? existingEvidence.lastConfirmedAt
+          : undefined) ?? lastConfirmedAtRaw,
+    };
+
+    return { ...t, evidence: stripVolatileEvidence(merged) };
+  }
+
+  const created: EvidenceLike = {
+    signalCount: signalCountUpstream ?? 1,
+    sourceCount: sourceCountUpstream ?? 1,
+    firstSeenAt: firstSeenAtRaw,
+    lastConfirmedAt: lastConfirmedAtRaw,
+  };
+
+  return { ...t, evidence: stripVolatileEvidence(created) };
+}
+
+/**
+ * Stage 3.x — Multi-source truth guard (deterministic)
+ */
+function enforceMultiSourceTruth(trend: unknown): unknown {
+  if (!trend || typeof trend !== "object") return trend;
+
+  const t = trend as TrendLike;
+
+  const decisionState = typeof t.decisionState === "string" ? t.decisionState.toUpperCase() : null;
+
+  if (decisionState !== "ACT") return t;
+
+  const evidence =
+    t.evidence && typeof t.evidence === "object" ? (t.evidence as EvidenceLike) : null;
+
+  const sourceCount =
+    typeof evidence?.sourceCount === "number" && Number.isFinite(evidence.sourceCount)
+      ? evidence.sourceCount
+      : null;
+
+  if (sourceCount == null || sourceCount < 2) {
+    return {
+      ...t,
+      decisionState: "WAIT",
+      decisionRationale:
+        "Corroboration not yet proven (single-source live feed); hold for multi-source confirmation before acting.",
+    };
+  }
+
+  return t;
+}
+
+/**
+ * Stage 3.8 — Deterministic "Why this matters" (no time-derived values)
+ */
+function ensureWhyThisMatters(trend: unknown): unknown {
+  if (!trend || typeof trend !== "object") return trend;
+
+  const t = trend as TrendLike;
+
+  if (typeof t.whyThisMatters === "string" && t.whyThisMatters.trim().length > 0) {
+    return t;
   }
 
   const evidence =
-    trend.evidence && typeof trend.evidence === "object" ? trend.evidence : null;
+    t.evidence && typeof t.evidence === "object" ? (t.evidence as EvidenceLike) : null;
 
   const signalCount =
     typeof evidence?.signalCount === "number" && Number.isFinite(evidence.signalCount)
@@ -144,11 +283,6 @@ function ensureWhyThisMatters(trend: any) {
       ? evidence.sourceCount
       : null;
 
-  const ageHours = toFixedSafe(evidence?.ageHours, 1);
-  const recencyMins = toIntSafe(evidence?.recencyMins);
-  const velocityPerHour = toFixedSafe(evidence?.velocityPerHour, 2);
-
-  // Sentence 1: evidence facts (only what is known)
   const parts: string[] = [];
 
   if (signalCount != null && sourceCount != null) {
@@ -162,105 +296,49 @@ function ensureWhyThisMatters(trend: any) {
   } else if (sourceCount != null) {
     parts.push(`${sourceCount} source${sourceCount === 1 ? "" : "s"}`);
   } else {
-    // If we truly have nothing, don't invent.
     parts.push("Evidence available");
   }
 
-  const timingBits: string[] = [];
-  if (ageHours != null) timingBits.push(`last ${ageHours}h`);
-  if (recencyMins != null) timingBits.push(`last confirmed ${recencyMins}m ago`);
-  if (velocityPerHour != null) timingBits.push(`~${velocityPerHour}/hr`);
+  const sentence1 = `${parts.join(" ")}.`;
 
-  const sentence1 =
-    timingBits.length > 0
-      ? `${parts.join(" ")} (${timingBits.join("; ")}).`
-      : `${parts.join(" ")}.`;
-
-  // Sentence 2: guidance derived ONLY from decision fields already present
-  const decisionState =
-    typeof trend.decisionState === "string" ? trend.decisionState.toUpperCase() : null;
+  const decisionState = typeof t.decisionState === "string" ? t.decisionState.toUpperCase() : null;
   const signalStrength =
-    typeof trend.signalStrength === "string" ? trend.signalStrength.toUpperCase() : null;
-  const trajectory =
-    typeof trend.confidenceTrajectory === "string"
-      ? trend.confidenceTrajectory.toUpperCase()
-      : null;
+    typeof t.signalStrength === "string" ? t.signalStrength.toUpperCase() : null;
 
   let sentence2: string | null = null;
 
-  if (decisionState === "ACT") {
-    sentence2 = "Strong enough to act — consider publishing/briefing now.";
-  } else if (decisionState === "WAIT") {
-    // Stay strictly within known labels; don’t invent reasons beyond “density/breadth”
-    if (signalStrength === "WEAK") {
-      sentence2 = "Stable but weak — wait for more density/breadth before acting.";
-    } else {
-      sentence2 = "Hold for confirmation — wait for stronger convergence.";
-    }
+  if (decisionState === "ACT") sentence2 = "Enough evidence to responsibly move now.";
+  else if (decisionState === "WAIT") {
+    sentence2 =
+      signalStrength === "WEAK"
+        ? "Not enough density/breadth yet to act responsibly."
+        : "Hold for confirmation before acting.";
   } else if (decisionState === "REFRESH") {
-    sentence2 = "Insufficient convergence — refresh soon for confirmation.";
-  } else if (signalStrength === "WEAK" && trajectory === "WEAKENING") {
-    // Extra guard: still deterministic, but only if both labels exist
-    sentence2 = "Weakening signal — deprioritise unless it rebounds.";
+    sentence2 = "Not enough confirmed evidence yet — refresh for confirmation.";
   }
 
-  const whyThisMatters = sentence2 ? `${sentence1} ${sentence2}` : sentence1;
-
-  return {
-    ...trend,
-    whyThisMatters,
-  };
+  return { ...t, whyThisMatters: sentence2 ? `${sentence1} ${sentence2}` : sentence1 };
 }
 
 /**
  * Stage 3.9 — Deterministic "Minimal action hint"
- * One short UI hint sentence derived ONLY from decision fields (read-only).
- *
- * Rules:
- * - Never overwrite if upstream already provides actionHint
- * - One sentence max
- * - No LLM
- * - No marketing language
- * - No behaviour steering beyond evidence (UI hint only)
  */
-function ensureActionHint(trend: any) {
+function ensureActionHint(trend: unknown): unknown {
   if (!trend || typeof trend !== "object") return trend;
 
-  if (typeof trend.actionHint === "string" && trend.actionHint.trim().length > 0) {
-    return trend;
+  const t = trend as TrendLike;
+
+  if (typeof t.actionHint === "string" && t.actionHint.trim().length > 0) {
+    return t;
   }
 
-  const decisionState =
-    typeof trend.decisionState === "string" ? trend.decisionState.toUpperCase() : null;
+  const decisionState = typeof t.decisionState === "string" ? t.decisionState.toUpperCase() : null;
 
-  const signalStrength =
-    typeof trend.signalStrength === "string" ? trend.signalStrength.toUpperCase() : null;
-
-  const trajectory =
-    typeof trend.confidenceTrajectory === "string"
-      ? trend.confidenceTrajectory.toUpperCase()
-      : null;
-
-  // Deterministic defaults (safe + non-persuasive)
   let actionHint = "Track for another signal cycle.";
+  if (decisionState === "ACT") actionHint = "Worth turning into a brief now.";
+  if (decisionState === "REFRESH") actionHint = "Recheck shortly for movement.";
 
-  if (decisionState === "ACT") {
-    actionHint = "Worth turning into a brief now.";
-  } else if (decisionState === "WAIT") {
-    actionHint = "Track for another signal cycle.";
-  } else if (decisionState === "REFRESH") {
-    actionHint = "Recheck shortly for movement.";
-  } else {
-    // If decisionState is missing, fall back only to the other labels (still deterministic)
-    if (signalStrength === "WEAK" && trajectory === "WEAKENING") {
-      actionHint = "Track for another signal cycle.";
-    }
-  }
-
-  return {
-    ...trend,
-    actionHint,
-  };
+  return { ...t, actionHint };
 }
 
 export async function GET(request: Request) {
@@ -269,72 +347,95 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
 
-    // preferred params for live
     const pack = (searchParams.get("pack") || "fragrance").trim().toLowerCase();
     const limit = parseLimit(searchParams.get("limit"), 25);
 
-    // Call the already-working live endpoint.
     const url = origin
       ? `${origin}/api/signals/reddit?pack=${encodeURIComponent(pack)}&limit=${limit}`
       : `/api/signals/reddit?pack=${encodeURIComponent(pack)}&limit=${limit}`;
 
-    const upstream = await safeFetchJSON<LiveTrendsResponse>(url);
+    const upstream = await safeFetchJSON<UpstreamTrendsResponse>(url);
 
-    // If upstream is missing or reports unavailable, return safe empty (never-500).
-    if (!upstream || upstream.status !== "ok") {
-      return NextResponse.json(
-        {
-          source: "live",
-          status: "unavailable",
-          count: 0,
-          trends: [],
-          message: upstream?.message || "Live source unavailable right now (reddit).",
-          debug: {
-            pack,
-            limit,
-            upstream: upstream ? { source: upstream.source, status: upstream.status } : null,
-          },
-        },
-        { status: 200 }
-      );
-    }
-
-    const rawTrends = Array.isArray(upstream.trends) ? upstream.trends : [];
-
-    // Attach evidence primitives (UI-only support; deterministic)
-    // Then attach whyThisMatters (truth-only; deterministic)
-    // Then attach actionHint (minimal UI hint; deterministic)
-    const trends = rawTrends
-      .map(ensureEvidence)
-      .map(ensureWhyThisMatters)
-      .map(ensureActionHint);
-
-    // Return stable contract expected by UI.
-    return NextResponse.json({
-      source: "live",
-      status: "ok",
-      count: trends.length,
-      trends,
-      // keep useful upstream telemetry for debugging but don’t change the Trend[] shape beyond evidence + whyThisMatters + actionHint
-      debug: {
-        pack,
-        limit,
-        upstreamSource: upstream.source,
-        telemetry: upstream.telemetry ?? null,
-      },
-    });
-  } catch (err) {
-    console.error("[/api/trends/live] error:", err);
-
-    return NextResponse.json(
-      {
+    if (!upstream) {
+      const payload: LiveApiResponse = {
         source: "live",
         status: "unavailable",
         count: 0,
         trends: [],
-        message: "Unable to build live trends right now.",
+        message: "Live source unavailable right now (reddit).",
+        debug: { pack, limit, upstream: null },
+      };
+      return NextResponse.json(payload, { status: 200 });
+    }
+
+    if (upstream.status && upstream.status !== "ok") {
+      const payload: LiveApiResponse = {
+        source: "live",
+        status: "unavailable",
+        count: 0,
+        trends: [],
+        message: upstream.message ?? "Live source unavailable right now (reddit).",
+        debug: {
+          pack,
+          limit,
+          upstream: { source: upstream.source ?? "unknown", status: upstream.status },
+        },
+      };
+      return NextResponse.json(payload, { status: 200 });
+    }
+
+    if (!Array.isArray(upstream.trends)) {
+      const payload: LiveApiResponse = {
+        source: "live",
+        status: "unavailable",
+        count: 0,
+        trends: [],
+        message: upstream.message ?? "Live source returned no trends.",
+        debug: {
+          pack,
+          limit,
+          upstream: { source: upstream.source ?? "unknown", status: upstream.status },
+        },
+      };
+      return NextResponse.json(payload, { status: 200 });
+    }
+
+    const rawTrends = upstream.trends;
+
+    const trends = rawTrends
+      .map(ensureEvidence)
+      .map(enforceMultiSourceTruth)
+      .map(ensureWhyThisMatters)
+      .map(ensureActionHint);
+
+    const okPayload: LiveApiResponse = {
+      source: "live",
+      status: "ok",
+      count: trends.length,
+      trends,
+      debug: {
+        pack,
+        limit,
+        upstreamSource: upstream.source ?? "unknown",
+        telemetry: upstream.telemetry ?? null,
+        corroborationMode: "single-source (reddit-only)",
+        note: "Volatile time-derived fields stripped to prevent client refetch loops.",
+        upstreamStatus: upstream.status, // possibly undefined; truth-only
       },
-      { status: 200 } // never-500 rule
-    );
+    };
+
+    return NextResponse.json(okPayload, { status: 200 });
+  } catch (err) {
+    console.error("[/api/trends/live] error:", err);
+
+    const payload: LiveApiResponse = {
+      source: "live",
+      status: "unavailable",
+      count: 0,
+      trends: [],
+      message: "Unable to build live trends right now.",
+    };
+
+    return NextResponse.json(payload, { status: 200 });
   }
 }

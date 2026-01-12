@@ -30,28 +30,19 @@ type CulturalInsight = {
 
 export async function POST(req: NextRequest) {
   if (!process.env.OPENAI_API_KEY) {
-    return new Response(
-      JSON.stringify({ error: "Missing OPENAI_API_KEY" }),
-      { status: 500 }
-    );
+    return new Response(JSON.stringify({ error: "Missing OPENAI_API_KEY" }), { status: 500 });
   }
 
   let body: { brief: Brief };
   try {
     body = await req.json();
   } catch {
-    return new Response(
-      JSON.stringify({ error: "Invalid JSON payload" }),
-      { status: 400 }
-    );
+    return new Response(JSON.stringify({ error: "Invalid JSON payload" }), { status: 400 });
   }
 
   const { brief } = body;
   if (!brief) {
-    return new Response(
-      JSON.stringify({ error: "Missing brief" }),
-      { status: 400 }
-    );
+    return new Response(JSON.stringify({ error: "Missing brief" }), { status: 400 });
   }
 
   // Appatize is multi-platform by design
@@ -60,10 +51,7 @@ export async function POST(req: NextRequest) {
   const userContextJson = JSON.stringify(
     {
       title: brief.title,
-      trend:
-        typeof brief.trend === "string"
-          ? brief.trend
-          : brief.trend?.name,
+      trend: typeof brief.trend === "string" ? brief.trend : brief.trend?.name,
       objective: brief.objective,
       audienceHint: brief.audienceHint,
       platformHint: brief.platformHint,
@@ -162,8 +150,7 @@ export async function POST(req: NextRequest) {
         if (angleName) angleName = cleanText(angleName);
         if (notes) notes = cleanText(notes);
 
-        const prettyLabel =
-          platformId.charAt(0).toUpperCase() + platformId.slice(1);
+        const prettyLabel = platformId.charAt(0).toUpperCase() + platformId.slice(1);
 
         return {
           id: platformId,
@@ -240,8 +227,7 @@ export async function POST(req: NextRequest) {
         ],
       });
 
-      const scoringRaw =
-        scoringCompletion.choices[0]?.message?.content?.trim() ?? "";
+      const scoringRaw = scoringCompletion.choices[0]?.message?.content?.trim() ?? "";
 
       type ScoringResult = {
         winnerId?: string;
@@ -262,19 +248,14 @@ export async function POST(req: NextRequest) {
       }
 
       if (scoring && Array.isArray(scoring.variants)) {
-        const byId = new Map<
-          string,
-          { score?: number; rank?: number; reason?: string }
-        >();
+        const byId = new Map<string, { score?: number; rank?: number; reason?: string }>();
 
         for (const item of scoring.variants) {
           if (!item || typeof item.id !== "string") continue;
           byId.set(item.id, {
             score: item.score,
             rank: item.rank,
-            reason: item.reason
-              ? cleanText(item.reason)
-              : undefined,
+            reason: item.reason ? cleanText(item.reason) : undefined,
           });
         }
 
@@ -283,11 +264,7 @@ export async function POST(req: NextRequest) {
           let score: number | undefined;
           let reason: string | undefined;
 
-          if (
-            scored &&
-            typeof scored.score === "number" &&
-            !Number.isNaN(scored.score)
-          ) {
+          if (scored && typeof scored.score === "number" && !Number.isNaN(scored.score)) {
             const clamped = Math.max(0, Math.min(10, scored.score));
             score = clamped;
           }
@@ -382,13 +359,9 @@ export async function POST(req: NextRequest) {
               ? cleanText(parsed.culturalContext)
               : undefined,
           momentInsight:
-            typeof parsed.momentInsight === "string"
-              ? cleanText(parsed.momentInsight)
-              : undefined,
+            typeof parsed.momentInsight === "string" ? cleanText(parsed.momentInsight) : undefined,
           flowGuidance:
-            typeof parsed.flowGuidance === "string"
-              ? cleanText(parsed.flowGuidance)
-              : undefined,
+            typeof parsed.flowGuidance === "string" ? cleanText(parsed.flowGuidance) : undefined,
           creativePrinciple:
             typeof parsed.creativePrinciple === "string"
               ? cleanText(parsed.creativePrinciple)
@@ -411,10 +384,17 @@ export async function POST(req: NextRequest) {
       }),
       { status: 200 }
     );
-  } catch (err: any) {
-    console.error("[multi-variant generate] Error:", err);
+  } catch (err: unknown) {
+    const message =
+      err instanceof Error ? err.message : typeof err === "string" ? err : "Unknown error";
+    console.error("[multi-variant generate] Error:", message, err);
 
-    if (err?.status === 429 || err?.code === "rate_limit_exceeded") {
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      ((err as { status?: number }).status === 429 ||
+        (err as { code?: string }).code === "rate_limit_exceeded")
+    ) {
       return new Response(
         JSON.stringify({
           error:
@@ -425,9 +405,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    return new Response(
-      JSON.stringify({ error: "Script generation failed" }),
-      { status: 500 }
-    );
+    return new Response(JSON.stringify({ error: "Script generation failed" }), { status: 500 });
   }
 }

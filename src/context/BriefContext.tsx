@@ -21,15 +21,22 @@ export type DecisionState = "ACT" | "WAIT" | "REFRESH";
 export type ConfidenceTrajectory = "ACCELERATING" | "STABLE" | "WEAKENING" | "VOLATILE";
 export type SignalStrength = "WEAK" | "MODERATE" | "STRONG";
 
-// Stage 3.4+ evidence primitives (deterministic, read-only)
 export type Evidence = {
   signalCount: number;
   sourceCount: number;
+
+  // Stage D.6+ additive (truth-only)
+  platformSourceCount?: number;
+  subredditCount?: number;
+
   firstSeenAt?: string;
   lastConfirmedAt?: string;
   ageHours?: number;
   recencyMins?: number;
   velocityPerHour?: number;
+
+  // Deterministic quality proxy used by decision surfacing
+  momentQualityScore?: number;
 };
 
 export interface Trend {
@@ -59,6 +66,13 @@ export interface Trend {
   // Optional debug fields for validation (safe to omit in production)
   debugScore?: number;
   debugVolume?: number;
+
+  // Stage 10 — Stop rule (kill-switch)
+  stopRule?: {
+    active: boolean;
+    code: "STOP_NOT_ACT" | "STOP_UNKNOWN";
+    reason: string;
+  };
 }
 
 export interface Angle {
@@ -87,6 +101,16 @@ export interface Brief {
   coreMessage?: string;
   objective?: string;
 
+  // Edit page fields (optional, UI-layer; safe to omit)
+  insight?: string;
+  creativeDirection?: string;
+  cta?: string;
+  hooks?: string[];
+  deliverables?: string[];
+
+  // Optional: extended/raw brief payload used by some UI routes (kept flexible for MVP)
+  fullBrief?: unknown;
+
   // Hints to guide script generation
   audienceHint?: string;
   platformHint?: string;
@@ -103,13 +127,24 @@ export interface Brief {
 
 /**
  * Context value shape
+ *
+ * NOTE:
+ * - We expose BOTH `activeBrief` and `selectedBrief`.
+ * - They are aliases for the same underlying state.
+ * - This keeps existing pages stable while unblocking pages that expect `selectedBrief`.
  */
 
 interface BriefContextValue {
+  // Canonical state
   activeBrief: Brief | null;
   setActiveBrief: (brief: Brief | null) => void;
+
+  // Back-compat alias (some pages use "selectedBrief")
+  selectedBrief: Brief | null;
+  setSelectedBrief: (brief: Brief | null) => void;
+
   briefs: Brief[];
-  // IMPORTANT: allow both value and functional updater forms
+  // allow both value and functional updater forms
   setBriefs: Dispatch<SetStateAction<Brief[]>>;
 
   // Engine helper: Trend + Angle → Appatize creative Brief
@@ -141,8 +176,7 @@ export function BriefProvider({ children }: { children: ReactNode }) {
         angle.hook ||
         "Turn this cultural signal into creator-native content that feels inevitable.",
 
-      objective:
-        angle.outcome || "Drive meaningful action from the right audience.",
+      objective: angle.outcome || "Drive meaningful action from the right audience.",
 
       audienceHint: angle.audience,
       platformHint: angle.platform,
@@ -157,7 +191,7 @@ export function BriefProvider({ children }: { children: ReactNode }) {
     };
 
     setActiveBrief(brief);
-    setBriefs((prev) => [...prev, brief]);
+    setBriefs((prev) => [brief, ...prev]);
 
     return brief;
   };
@@ -167,6 +201,11 @@ export function BriefProvider({ children }: { children: ReactNode }) {
       value={{
         activeBrief,
         setActiveBrief,
+
+        // Aliases (same underlying state)
+        selectedBrief: activeBrief,
+        setSelectedBrief: setActiveBrief,
+
         briefs,
         setBriefs,
         generateBriefFromAngle,
