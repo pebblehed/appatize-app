@@ -1,12 +1,34 @@
-﻿{
+{
+  // --- Copilot: reduce drift / force intent ---
+  "github.copilot.enable": {
+    "*": true,
+    "plaintext": true,
+    "markdown": true,
+    "scminput": false
+  },
+
+  // Show suggestions but do not aggressively auto-accept patterns
+  "editor.inlineSuggest.enabled": true,
+
+  // Keep edits explicit
+  "editor.suggestSelection": "first",
+  "editor.acceptSuggestionOnEnter": "off",
+
+  // Format + lint discipline
   "editor.formatOnSave": true,
   "editor.codeActionsOnSave": {
     "source.fixAll.eslint": "explicit"
   },
-  "files.trimTrailingWhitespace": true,
+
+  // TypeScript discipline
+  "typescript.preferences.quoteStyle": "double",
+  "typescript.tsserver.experimental.enableProjectDiagnostics": true,
+
+  // Reduce noisy “help”
+  "javascript.suggest.autoImports": true,
+  "typescript.suggest.autoImports": true,
+
+  // Repo hygiene
   "files.insertFinalNewline": true,
-  "editor.tabSize": 2,
-  "editor.rulers": [100],
-  "typescript.tsdk": "node_modules/typescript/lib",
-  "eslint.validate": ["javascript", "javascriptreact", "typescript", "typescriptreact"]
+  "files.trimTrailingWhitespace": true
 }

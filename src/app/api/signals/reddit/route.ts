@@ -1,25 +1,27 @@
-// src/app/api/trends/live/route.ts
+// src/app/api/signals/reddit/route.ts
 //
-// Live Trends API (deterministic, never-500)
+// Stage 2 — Reddit Signals API (deterministic, never-hang, never-500)
 //
 // Purpose:
-// - Surface Trend[] for the UI from live signal sources.
-// - Stage 3+ logic (decision surfacing etc.) may be embedded upstream.
-//   This route only fills missing deterministic primitives needed by the UI.
-//
-// Current wiring (minimal):
-// - Uses the existing Stage 2 Reddit endpoint as the live signal source:
-//   GET /api/signals/reddit?pack=fragrance&limit=25
+// - Fetch recent posts from selected subreddits per "pack" and return a tolerant
+//   Trend[] list for upstream consumers (/api/trends/live).
 //
 // Rules:
 // - Never 500
+// - Never hang (hard timeouts)
 // - Safe empty states
-// - Do NOT fake intelligence: if upstream is unavailable, return [] with status=unavailable.
+// - Truth-only: no invented facts, no creative claims
 //
-// IMPORTANT HOTFIX (loop prevention):
-// - Do NOT return volatile "time-now" derived fields (ageHours, recencyMins, velocityPerHour).
-//   Those change every request and can trigger client refetch loops.
-// - Keep stable primitives only: counts + timestamps.
+// Output envelope (tolerant, stable):
+// {
+//   source: "reddit",
+//   status: "ok" | "unavailable",
+//   count: number,
+//   trends: unknown[],
+//   message?: string,
+//   telemetry?: unknown,
+//   debug?: unknown
+// }
 
 import { NextResponse } from "next/server";
 
@@ -27,374 +29,362 @@ export const dynamic = "force-dynamic";
 
 type Status = "ok" | "unavailable";
 
-/** Shape we expect FROM the upstream /api/signals/reddit route (tolerant). */
+type RedditChild = {
+  kind?: string;
+  data?: {
+    id?: string;
+    name?: string;
+    title?: string;
+    subreddit?: string;
+    subreddit_name_prefixed?: string;
+    permalink?: string;
+    url?: string;
+    created_utc?: number;
+    num_comments?: number;
+    score?: number;
+    ups?: number;
+    downs?: number;
+    upvote_ratio?: number;
+    over_18?: boolean;
+    is_self?: boolean;
+    selftext?: string;
+    author?: string;
+  };
+};
+
+type RedditListing = {
+  kind?: string;
+  data?: {
+    children?: RedditChild[];
+    after?: string | null;
+    before?: string | null;
+  };
+};
+
 type UpstreamTrendsResponse = {
-  source?: string;
-  mode?: string;
-
-  // Stage 2 may omit status entirely.
-  status?: Status;
-
-  count?: number;
-  trends?: unknown[];
-
+  source: "reddit";
+  status: Status;
+  count: number;
+  trends: unknown[];
   message?: string;
   telemetry?: unknown;
   debug?: unknown;
 };
 
-/** Shape we return FROM this /api/trends/live route (stable contract). */
-type LiveApiResponse = {
-  source: "live";
-  status: Status;
-  count: number;
-  trends: unknown[];
-  message?: string;
-  debug?: unknown;
+type SignalStrength = "WEAK" | "MEDIUM" | "STRONG";
+
+/**
+ * Trajectory is a stable categorical label.
+ * IMPORTANT:
+ * - This is NOT "velocity" and NOT time-now derived.
+ * - It is a deterministic direction label aligned to strength thresholds.
+ */
+type Trajectory = "FLAT" | "RISING" | "SURGING";
+
+type TrendCandidate = {
+  id: string;
+  name: string;
+  description: string;
+
+  evidence?: {
+    signalCount?: number;
+    sourceCount?: number;
+    firstSeenAt?: string;
+    lastConfirmedAt?: string;
+    subredditCount?: number;
+    platformSourceCount?: number;
+
+    // ✅ stable categorical direction label
+    trajectory?: Trajectory;
+  };
+
+  source?: "reddit";
+  subreddit?: string;
+  permalink?: string;
+  url?: string;
+  createdAt?: string;
+
+  decisionState?: "WAIT" | "REFRESH" | "ACT";
+  signalStrength?: SignalStrength;
+
+  // (optional) allow trajectory to exist at root too (some UIs read it there)
+  trajectory?: Trajectory;
 };
 
-type JsonRecord = Record<string, unknown>;
-type EvidenceLike = JsonRecord;
-type TrendLike = JsonRecord;
-
-function parseLimit(raw: string | null, fallback: number) {
+function parseLimit(raw: string | null, fallback: number): number {
   const n = raw ? Number(raw) : NaN;
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.min(Math.floor(n), 50);
 }
 
-function getOrigin(request: Request): string {
+function packToSubreddits(pack: string): string[] {
+  const p = pack.trim().toLowerCase();
+
+  // fragrance: keep this conservative + likely-to-exist/public
+  if (p === "fragrance") {
+    return ["fragrance", "Perfumes", "Colognes", "FemaleFragrance"];
+  }
+
+  if (p === "marketing") return ["marketing", "advertising", "socialmedia", "branding"];
+  if (p === "beauty") return ["beauty", "MakeupAddiction", "SkincareAddiction"];
+  if (p === "fitness") return ["fitness", "loseit", "bodyweightfitness"];
+
+  return ["marketing", "advertising", "trends", "socialmedia"];
+}
+
+async function fetchWithTimeout(
+  url: string,
+  ms: number
+): Promise<{ res: Response | null; elapsedMs: number }> {
+  const ac = new AbortController();
+  const started = Date.now();
+  const t = setTimeout(() => ac.abort(), ms);
+
   try {
-    return new URL(request.url).origin;
+    const res = await fetch(url, {
+      signal: ac.signal,
+      cache: "no-store",
+      headers: {
+        "User-Agent": "appatize-dev/1.0",
+        Accept: "application/json",
+      },
+    });
+    return { res, elapsedMs: Date.now() - started };
   } catch {
-    return "";
+    return { res: null, elapsedMs: Date.now() - started };
+  } finally {
+    clearTimeout(t);
   }
 }
 
-async function safeFetchJSON<T>(url: string): Promise<T | null> {
-  try {
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) return null;
-    return (await res.json()) as T;
-  } catch {
-    return null;
-  }
-}
-
-function toNumberOrNull(v: unknown): number | null {
-  if (typeof v !== "number" || !Number.isFinite(v)) return null;
-  return v;
-}
-
-function toIntOrNull(v: unknown): number | null {
-  const n = toNumberOrNull(v);
-  if (n == null) return null;
-  return Math.round(n);
-}
-
-function toISOIfValidDateString(v: unknown): string | undefined {
-  if (typeof v !== "string") return undefined;
-  const d = new Date(v);
+function isoFromUtcSeconds(v: unknown): string | undefined {
+  if (typeof v !== "number" || !Number.isFinite(v)) return undefined;
+  const d = new Date(v * 1000);
   if (Number.isNaN(d.getTime())) return undefined;
   return d.toISOString();
 }
 
-/**
- * Remove volatile fields that drift with "now".
- * Keep only stable primitives that the UI can safely use.
- */
-function stripVolatileEvidence(e: EvidenceLike): EvidenceLike {
-  if (!e || typeof e !== "object") return e;
-
-  const stable: EvidenceLike = {};
-
-  // stable counts
-  if (typeof e.signalCount === "number") stable.signalCount = e.signalCount;
-  if (typeof e.sourceCount === "number") stable.sourceCount = e.sourceCount;
-
-  // stable timestamps (raw ISO)
-  if (typeof e.firstSeenAt === "string") stable.firstSeenAt = e.firstSeenAt;
-  if (typeof e.lastConfirmedAt === "string") stable.lastConfirmedAt = e.lastConfirmedAt;
-
-  // keep other stable “counts” (non-time-derived)
-  if (typeof e.platformSourceCount === "number") stable.platformSourceCount = e.platformSourceCount;
-  if (typeof e.subredditCount === "number") stable.subredditCount = e.subredditCount;
-
-  // quality score is stable within the upstream call; keep if present
-  if (typeof e.momentQualityScore === "number") stable.momentQualityScore = e.momentQualityScore;
-
-  return stable;
+function safeString(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim().length > 0 ? v : undefined;
 }
 
 /**
- * Attach minimal evidence primitives to a Trend object if missing.
+ * Fix classic mojibake artifacts (e.g. â€™, â€œ, Ã…) caused by a bad decode step upstream.
+ * Deterministic + conservative: only attempts repair when markers are present.
  */
-function ensureEvidence(trend: unknown): unknown {
-  if (!trend || typeof trend !== "object") return trend;
-
-  const t = trend as TrendLike;
-
-  const existingEvidence =
-    t.evidence && typeof t.evidence === "object" ? (t.evidence as EvidenceLike) : null;
-
-  const firstSeenAtRaw =
-    toISOIfValidDateString(existingEvidence?.firstSeenAt) ??
-    toISOIfValidDateString(t.firstSeenAt) ??
-    toISOIfValidDateString(t.createdAt) ??
-    toISOIfValidDateString(t.publishedAt) ??
-    undefined;
-
-  const lastConfirmedAtRaw =
-    toISOIfValidDateString(existingEvidence?.lastConfirmedAt) ??
-    toISOIfValidDateString(t.lastConfirmedAt) ??
-    toISOIfValidDateString(t.updatedAt) ??
-    toISOIfValidDateString(t.lastSeenAt) ??
-    firstSeenAtRaw;
-
-  const signalCountUpstream =
-    toIntOrNull(existingEvidence?.signalCount) ??
-    toIntOrNull(t.signalCount) ??
-    toIntOrNull(t.debugSignalCount) ??
-    null;
-
-  const sourceCountUpstream =
-    toIntOrNull(existingEvidence?.sourceCount) ??
-    toIntOrNull(t.sourceCount) ??
-    toIntOrNull(t.debugSourceCount) ??
-    null;
-
-  if (existingEvidence) {
-    const merged = {
-      ...existingEvidence,
-      signalCount: signalCountUpstream ?? existingEvidence.signalCount ?? 1,
-      sourceCount: sourceCountUpstream ?? existingEvidence.sourceCount ?? 1,
-      firstSeenAt: existingEvidence.firstSeenAt ?? firstSeenAtRaw,
-      lastConfirmedAt: existingEvidence.lastConfirmedAt ?? lastConfirmedAtRaw,
-    };
-
-    return { ...t, evidence: stripVolatileEvidence(merged) };
+function fixMojibake(s: string): string {
+  if (!/(Ã|â€™|â€œ|â€|â€¦|â¦|\uFFFD)/.test(s)) return s;
+  try {
+    return Buffer.from(s, "latin1").toString("utf8");
+  } catch {
+    return s;
   }
+}
 
-  const created = {
-    signalCount: signalCountUpstream ?? 1,
-    sourceCount: sourceCountUpstream ?? 1,
-    firstSeenAt: firstSeenAtRaw,
-    lastConfirmedAt: lastConfirmedAtRaw,
-  };
-
-  return { ...t, evidence: stripVolatileEvidence(created) };
+function normalizeText(s: string): string {
+  return s.replace(/\s+/g, " ").trim();
 }
 
 /**
- * Stage 3.x — Multi-source truth guard (deterministic)
+ * Deterministic trajectory from strength thresholds.
+ * No time-now logic; no “velocity” claims.
  */
-function enforceMultiSourceTruth(trend: unknown): unknown {
-  if (!trend || typeof trend !== "object") return trend;
-
-  const t = trend as TrendLike;
-
-  const decisionState = typeof t.decisionState === "string" ? t.decisionState.toUpperCase() : null;
-
-  if (decisionState !== "ACT") return t;
-
-  const evidence =
-    t.evidence && typeof t.evidence === "object" ? (t.evidence as EvidenceLike) : null;
-
-  const sourceCount =
-    typeof evidence?.sourceCount === "number" && Number.isFinite(evidence.sourceCount)
-      ? evidence.sourceCount
-      : null;
-
-  if (sourceCount == null || sourceCount < 2) {
-    return {
-      ...t,
-      decisionState: "WAIT",
-      decisionRationale:
-        "Corroboration not yet proven (single-source live feed); hold for multi-source confirmation before acting.",
-    };
-  }
-
-  return t;
+function trajectoryFromStrength(strength: SignalStrength): Trajectory {
+  if (strength === "STRONG") return "SURGING";
+  if (strength === "MEDIUM") return "RISING";
+  return "FLAT";
 }
 
-/**
- * Stage 3.8 — Deterministic "Why this matters" (no time-derived values)
- */
-function ensureWhyThisMatters(trend: unknown): unknown {
-  if (!trend || typeof trend !== "object") return trend;
+function buildCandidatesFromListing(listing: RedditListing, subreddit: string): TrendCandidate[] {
+  const children = listing?.data?.children;
+  if (!Array.isArray(children) || children.length === 0) return [];
 
-  const t = trend as TrendLike;
+  const out: TrendCandidate[] = [];
 
-  if (typeof t.whyThisMatters === "string" && t.whyThisMatters.trim().length > 0) {
-    return t;
+  for (const child of children) {
+    const d = child?.data;
+    if (!d) continue;
+
+    const titleRaw = safeString(d.title);
+    if (!titleRaw) continue;
+
+    if (d.over_18 === true) continue;
+
+    const id = safeString(d.id) ?? safeString(d.name);
+    if (!id) continue;
+
+    const createdAt = isoFromUtcSeconds(d.created_utc);
+
+    const permalink = safeString(d.permalink) ? `https://www.reddit.com${d.permalink}` : undefined;
+
+    const url = safeString(d.url);
+
+    const score = typeof d.score === "number" ? d.score : 0;
+    const comments = typeof d.num_comments === "number" ? d.num_comments : 0;
+
+    let signalStrength: SignalStrength = "WEAK";
+    if (score >= 50 || comments >= 25) signalStrength = "MEDIUM";
+    if (score >= 200 || comments >= 80) signalStrength = "STRONG";
+
+    let decisionState: TrendCandidate["decisionState"] = "WAIT";
+    if (signalStrength === "STRONG") decisionState = "ACT";
+    else if (signalStrength === "MEDIUM") decisionState = "REFRESH";
+
+    // ✅ trajectory is a stable categorical label aligned to strength
+    const trajectory = trajectoryFromStrength(signalStrength);
+
+    // Fix encoding artifacts before normalizing
+    const title = normalizeText(fixMojibake(titleRaw));
+
+    out.push({
+      id: `reddit:${subreddit}:${id}`,
+      name: title,
+      description: "Reddit signal (title-derived).",
+      source: "reddit",
+      subreddit,
+      permalink,
+      url,
+      createdAt,
+      signalStrength,
+      decisionState,
+
+      // ✅ emit trajectory (root + evidence) so downstream/UI has it regardless of where it reads
+      trajectory,
+      evidence: {
+        signalCount: 1,
+        sourceCount: 1,
+        firstSeenAt: createdAt,
+        lastConfirmedAt: createdAt,
+        subredditCount: 1,
+        platformSourceCount: 1,
+        trajectory,
+      },
+    });
   }
 
-  const evidence =
-    t.evidence && typeof t.evidence === "object" ? (t.evidence as EvidenceLike) : null;
-
-  const signalCount =
-    typeof evidence?.signalCount === "number" && Number.isFinite(evidence.signalCount)
-      ? evidence.signalCount
-      : null;
-
-  const sourceCount =
-    typeof evidence?.sourceCount === "number" && Number.isFinite(evidence.sourceCount)
-      ? evidence.sourceCount
-      : null;
-
-  const parts: string[] = [];
-
-  if (signalCount != null && sourceCount != null) {
-    parts.push(
-      `${signalCount} signal${signalCount === 1 ? "" : "s"} from ${sourceCount} source${
-        sourceCount === 1 ? "" : "s"
-      }`
-    );
-  } else if (signalCount != null) {
-    parts.push(`${signalCount} signal${signalCount === 1 ? "" : "s"}`);
-  } else if (sourceCount != null) {
-    parts.push(`${sourceCount} source${sourceCount === 1 ? "" : "s"}`);
-  } else {
-    parts.push("Evidence available");
-  }
-
-  const sentence1 = `${parts.join(" ")}.`;
-
-  const decisionState = typeof t.decisionState === "string" ? t.decisionState.toUpperCase() : null;
-  const signalStrength =
-    typeof t.signalStrength === "string" ? t.signalStrength.toUpperCase() : null;
-
-  let sentence2: string | null = null;
-
-  if (decisionState === "ACT") sentence2 = "Enough evidence to responsibly move now.";
-  else if (decisionState === "WAIT") {
-    sentence2 =
-      signalStrength === "WEAK"
-        ? "Not enough density/breadth yet to act responsibly."
-        : "Hold for confirmation before acting.";
-  } else if (decisionState === "REFRESH") {
-    sentence2 = "Not enough confirmed evidence yet — refresh for confirmation.";
-  }
-
-  return { ...t, whyThisMatters: sentence2 ? `${sentence1} ${sentence2}` : sentence1 };
+  return out;
 }
 
-/**
- * Stage 3.9 — Deterministic "Minimal action hint"
- */
-function ensureActionHint(trend: unknown): unknown {
-  if (!trend || typeof trend !== "object") return trend;
+function dedupeByName(items: TrendCandidate[]): TrendCandidate[] {
+  const seen = new Set<string>();
+  const out: TrendCandidate[] = [];
 
-  const t = trend as TrendLike;
-
-  if (typeof t.actionHint === "string" && t.actionHint.trim().length > 0) {
-    return t;
+  for (const item of items) {
+    const key = item.name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
   }
 
-  const decisionState = typeof t.decisionState === "string" ? t.decisionState.toUpperCase() : null;
-
-  let actionHint = "Track for another signal cycle.";
-  if (decisionState === "ACT") actionHint = "Worth turning into a brief now.";
-  if (decisionState === "REFRESH") actionHint = "Recheck shortly for movement.";
-
-  return { ...t, actionHint };
+  return out;
 }
 
 export async function GET(request: Request) {
-  const origin = getOrigin(request);
-
   try {
     const { searchParams } = new URL(request.url);
 
     const pack = (searchParams.get("pack") || "fragrance").trim().toLowerCase();
     const limit = parseLimit(searchParams.get("limit"), 25);
 
-    const url = origin
-      ? `${origin}/api/signals/reddit?pack=${encodeURIComponent(pack)}&limit=${limit}`
-      : `/api/signals/reddit?pack=${encodeURIComponent(pack)}&limit=${limit}`;
+    const subs = packToSubreddits(pack);
 
-    const upstream = await safeFetchJSON<UpstreamTrendsResponse>(url);
+    // Keep it light to avoid rate limits / slow dev hangs.
+    const perSubBase = Math.max(3, Math.min(10, Math.ceil(limit / Math.max(subs.length, 1))));
+    const perSub = pack === "fragrance" ? Math.min(perSubBase, 5) : perSubBase;
 
-    // --- Explicit narrowing (kills "possibly null" squiggles) ---
-    if (!upstream) {
-      const payload: LiveApiResponse = {
-        source: "live",
+    const startedAt = Date.now();
+
+    const results: TrendCandidate[] = [];
+
+    // Debug counters (truth-only) so we can see which subs fail.
+    const subDebug: Array<{
+      sub: string;
+      feed: "hot" | "new";
+      ok: boolean;
+      status: number | null;
+      elapsedMs: number;
+      items: number;
+    }> = [];
+
+    const feed: "hot" | "new" = pack === "fragrance" ? "new" : "hot";
+
+    for (const sub of subs) {
+      const url = `https://www.reddit.com/r/${encodeURIComponent(sub)}/${feed}.json?limit=${perSub}`;
+
+      const { res, elapsedMs } = await fetchWithTimeout(url, 3000);
+      if (!res || !res.ok) {
+        subDebug.push({
+          sub,
+          feed,
+          ok: false,
+          status: res ? res.status : null,
+          elapsedMs,
+          items: 0,
+        });
+        continue;
+      }
+
+      const json = (await res.json().catch(() => null)) as RedditListing | null;
+      if (!json) {
+        subDebug.push({
+          sub,
+          feed,
+          ok: false,
+          status: res.status,
+          elapsedMs,
+          items: 0,
+        });
+        continue;
+      }
+
+      const built = buildCandidatesFromListing(json, sub);
+      results.push(...built);
+
+      subDebug.push({
+        sub,
+        feed,
+        ok: true,
+        status: res.status,
+        elapsedMs,
+        items: built.length,
+      });
+    }
+
+    const deduped = dedupeByName(results).slice(0, limit);
+
+    const elapsedMs = Date.now() - startedAt;
+
+    if (deduped.length === 0) {
+      const payload: UpstreamTrendsResponse = {
+        source: "reddit",
         status: "unavailable",
         count: 0,
         trends: [],
-        message: "Live source unavailable right now (reddit).",
-        debug: { pack, limit, upstream: null },
+        message: "No usable Reddit signals returned for this pack.",
+        telemetry: { elapsedMs, subsTried: subs.length },
+        debug: { pack, limit, subs, feed, perSub, subDebug },
       };
       return NextResponse.json(payload, { status: 200 });
     }
 
-    if (upstream.status && upstream.status !== "ok") {
-      const payload: LiveApiResponse = {
-        source: "live",
-        status: "unavailable",
-        count: 0,
-        trends: [],
-        message: upstream.message ?? "Live source unavailable right now (reddit).",
-        debug: {
-          pack,
-          limit,
-          upstream: { source: upstream.source ?? "unknown", status: upstream.status },
-        },
-      };
-      return NextResponse.json(payload, { status: 200 });
-    }
-
-    if (!Array.isArray(upstream.trends)) {
-      const payload: LiveApiResponse = {
-        source: "live",
-        status: "unavailable",
-        count: 0,
-        trends: [],
-        message: upstream.message ?? "Live source returned no trends.",
-        debug: {
-          pack,
-          limit,
-          upstream: { source: upstream.source ?? "unknown", status: upstream.status },
-        },
-      };
-      return NextResponse.json(payload, { status: 200 });
-    }
-
-    // From here on: upstream is non-null AND has trends array.
-    const rawTrends = upstream.trends;
-
-    const trends = rawTrends
-      .map(ensureEvidence)
-      .map(enforceMultiSourceTruth)
-      .map(ensureWhyThisMatters)
-      .map(ensureActionHint);
-
-    const okPayload: LiveApiResponse = {
-      source: "live",
+    const payload: UpstreamTrendsResponse = {
+      source: "reddit",
       status: "ok",
-      count: trends.length,
-      trends,
-      debug: {
-        pack,
-        limit,
-        upstreamSource: upstream.source ?? "unknown",
-        telemetry: upstream.telemetry ?? null,
-        corroborationMode: "single-source (reddit-only)",
-        note: "Volatile time-derived fields stripped to prevent client refetch loops.",
-        upstreamStatus: upstream.status, // possibly undefined; truth-only
-      },
+      count: deduped.length,
+      trends: deduped,
+      telemetry: { elapsedMs, subsTried: subs.length },
+      debug: { pack, limit, subs, feed, perSub, subDebug },
     };
 
-    return NextResponse.json(okPayload, { status: 200 });
+    return NextResponse.json(payload, { status: 200 });
   } catch (err) {
-    console.error("[/api/trends/live] error:", err);
-
-    const payload: LiveApiResponse = {
-      source: "live",
+    const payload: UpstreamTrendsResponse = {
+      source: "reddit",
       status: "unavailable",
       count: 0,
       trends: [],
-      message: "Unable to build live trends right now.",
+      message: "Reddit signals unavailable (unexpected error).",
+      debug: { error: String(err) },
     };
 
     return NextResponse.json(payload, { status: 200 });

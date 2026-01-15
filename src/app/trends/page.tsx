@@ -36,17 +36,38 @@ import type { Trend as CoreTrend, TrendStatus as CoreTrendStatus } from "@/conte
 type TrendStatus = "emerging" | "peaking" | "stable" | "declining";
 
 type DecisionState = "ACT" | "WAIT" | "REFRESH";
-type ConfidenceTrajectory = "ACCELERATING" | "STABLE" | "WEAKENING" | "VOLATILE";
-type SignalStrength = "WEAK" | "MODERATE" | "STRONG";
 
+// ✅ Contract trajectory (stable label from /api/trends/live)
+type Trajectory = "FLAT" | "RISING" | "SURGING";
+
+// ✅ Strength: contract is WEAK/MEDIUM/STRONG, but tolerate MODERATE to avoid gaps
+type SignalStrength = "WEAK" | "MEDIUM" | "MODERATE" | "STRONG";
+
+/**
+ * Evidence (UI) — stable primitives only (NO now-derived fields).
+ * Mirrors what /api/trends/live returns.
+ */
 type Evidence = {
+  // stable counts
   signalCount: number;
   sourceCount: number;
+
+  // stable timestamps (ISO)
   firstSeenAt?: string;
   lastConfirmedAt?: string;
-  ageHours?: number;
-  recencyMins?: number;
-  velocityPerHour?: number;
+
+  // stable provenance details
+  platform?: string; // e.g. "reddit"
+  subreddit?: string;
+  permalink?: string;
+  url?: string;
+
+  // additional stable counts
+  platformSourceCount?: number;
+  subredditCount?: number;
+
+  // ✅ stable label
+  trajectory?: Trajectory | string;
 };
 
 type UiTrend = {
@@ -70,16 +91,17 @@ type UiTrend = {
 
   // Stage 3.4+ decision + evidence (optional)
   decisionState?: DecisionState;
-  confidenceTrajectory?: ConfidenceTrajectory;
   signalStrength?: SignalStrength;
   decisionRationale?: string;
   evidence?: Evidence;
+
+  // ✅ contract trajectory (root preferred; evidence fallback)
+  trajectory?: Trajectory | string;
 };
 
 /**
  * API response shapes – works with:
  * - /api/trends/live?pack=... (preferred)
- * - /api/signals/reddit?... (still compatible if needed)
  */
 type ApiTrend = {
   id: string;
@@ -102,10 +124,12 @@ type ApiTrend = {
 
   // Stage 3.4+ decision + evidence (optional)
   decisionState?: DecisionState;
-  confidenceTrajectory?: ConfidenceTrajectory;
   signalStrength?: SignalStrength;
   decisionRationale?: string;
   evidence?: Evidence;
+
+  // ✅ /api/trends/live includes this at root
+  trajectory?: Trajectory | string;
 };
 
 type TrendsApiResponse = {
@@ -342,10 +366,24 @@ function deriveExampleHook(api: ApiTrend): string {
   return `"${api.name}" but told as a first-person, creator-native story speaking directly to the audience.`;
 }
 
+function deriveUiTrajectory(api: ApiTrend): string {
+  const root = typeof api.trajectory === "string" ? api.trajectory.trim() : "";
+  if (root) return root;
+
+  const ev = typeof api.evidence?.trajectory === "string" ? api.evidence.trajectory.trim() : "";
+  if (ev) return ev;
+
+  const m = typeof api.momentumLabel === "string" ? api.momentumLabel.trim() : "";
+  if (m) return m;
+
+  return "—";
+}
+
 function mapApiTrendToUiTrend(api: ApiTrend): UiTrend {
   const status = mapStatus(api.status);
   const category = api.category || api.formatLabel || "Uncategorised";
   const movementLabel = api.momentumLabel || "";
+  const trajectory = deriveUiTrajectory(api);
 
   return {
     id: api.id,
@@ -363,10 +401,11 @@ function mapApiTrendToUiTrend(api: ApiTrend): UiTrend {
     debugVolume: api.debugVolume,
 
     decisionState: api.decisionState,
-    confidenceTrajectory: api.confidenceTrajectory,
     signalStrength: api.signalStrength,
     decisionRationale: api.decisionRationale,
     evidence: api.evidence,
+
+    trajectory,
   };
 }
 
@@ -441,18 +480,22 @@ function matchesStrategyLens(trend: UiTrend, lens: StrategyLensId) {
   return false;
 }
 
-function formatRecency(recencyMins?: number) {
-  if (recencyMins == null) return "—";
-  if (recencyMins < 60) return `${Math.round(recencyMins)}m ago`;
-  const hrs = Math.round(recencyMins / 60);
-  return `${hrs}h ago`;
-}
+/**
+ * Format ISO timestamp to UK format: dd/mm/yyyy, hh:mm:ss
+ */
+function formatUkDateTime(iso?: string) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
 
-function formatAge(ageHours?: number) {
-  if (ageHours == null) return "—";
-  if (ageHours < 24) return `${ageHours.toFixed(1)}h`;
-  const days = ageHours / 24;
-  return `${days.toFixed(1)}d`;
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const yyyy = d.getUTCFullYear();
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const min = String(d.getUTCMinutes()).padStart(2, "0");
+  const ss = String(d.getUTCSeconds()).padStart(2, "0");
+
+  return `${dd}/${mm}/${yyyy}, ${hh}:${min}:${ss}`;
 }
 
 // ---------- Stage 3.5: Chips + clarity mapping (UI-only) ----------
@@ -478,6 +521,7 @@ function chipClassForStrength(strength?: SignalStrength) {
   switch (strength) {
     case "STRONG":
       return `${pillBaseClass()} border-brand-pink/50 bg-brand-pink/10 text-neutral-100`;
+    case "MEDIUM":
     case "MODERATE":
       return `${pillBaseClass()} border-neutral-500/50 bg-black/15 text-neutral-200`;
     case "WEAK":
@@ -487,15 +531,14 @@ function chipClassForStrength(strength?: SignalStrength) {
   }
 }
 
-function chipClassForTrajectory(traj?: ConfidenceTrajectory) {
-  switch (traj) {
-    case "ACCELERATING":
+function chipClassForTrajectory(traj?: string) {
+  const t = (traj || "").toUpperCase();
+  switch (t) {
+    case "SURGING":
       return `${pillBaseClass()} border-brand-pink/40 bg-brand-pink/10 text-neutral-100`;
-    case "STABLE":
-      return `${pillBaseClass()} border-neutral-600/50 bg-black/10 text-neutral-300`;
-    case "VOLATILE":
+    case "RISING":
       return `${pillBaseClass()} border-neutral-500/50 bg-black/15 text-neutral-200`;
-    case "WEAKENING":
+    case "FLAT":
       return `${pillBaseClass()} border-neutral-700/50 bg-black/10 text-neutral-400`;
     default:
       return `${pillBaseClass()} border-shell-border bg-black/10 text-neutral-500`;
@@ -510,12 +553,12 @@ function decisionTooltip(t: UiTrend) {
 
 function strengthTooltip(t: UiTrend) {
   const s = t.signalStrength ?? "—";
-  return `Signal strength (read-only): ${s}\nDeterministic proxy using density + breadth + recency.`;
+  return `Signal strength (read-only): ${s}\nDeterministic proxy using density + breadth + engagement.`;
 }
 
 function trajectoryTooltip(t: UiTrend) {
-  const c = t.confidenceTrajectory ?? "—";
-  return `Confidence trajectory (read-only): ${c}\nDeterministic proxy using age + recency + density.`;
+  const tr = t.trajectory ?? t.evidence?.trajectory ?? "—";
+  return `Trajectory (read-only): ${tr}\nStable categorical label from the live signal feed (no time-now maths).`;
 }
 
 export default function TrendsPage() {
@@ -711,6 +754,8 @@ export default function TrendsPage() {
               const isEvidenceOpen = expandedEvidenceId === trend.id;
               const saved = isTrendPinned(trend.id);
 
+              const trajectory = trend.trajectory ?? trend.evidence?.trajectory ?? "—";
+
               return (
                 <article
                   key={trend.id}
@@ -720,7 +765,9 @@ export default function TrendsPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="space-y-1">
                         <p
-                          className={`mb-1 text-[11px] font-medium uppercase tracking-[0.16em] ${statusClass(trend.status)}`}
+                          className={`mb-1 text-[11px] font-medium uppercase tracking-[0.16em] ${statusClass(
+                            trend.status
+                          )}`}
                         >
                           {statusLabel(trend.status)}
                         </p>
@@ -775,10 +822,10 @@ export default function TrendsPage() {
                       </span>
 
                       <span
-                        className={chipClassForTrajectory(trend.confidenceTrajectory)}
+                        className={chipClassForTrajectory(trajectory)}
                         title={trajectoryTooltip(trend)}
                       >
-                        {trend.confidenceTrajectory ?? "—"}
+                        Trajectory: {trajectory}
                       </span>
                     </div>
 
@@ -814,9 +861,7 @@ export default function TrendsPage() {
                           </div>
                           <div>
                             <span className="text-neutral-500">Trajectory:</span>{" "}
-                            <span className="text-neutral-100">
-                              {trend.confidenceTrajectory ?? "—"}
-                            </span>
+                            <span className="text-neutral-100">{trajectory}</span>
                           </div>
                           <div>
                             <span className="text-neutral-500">Strength:</span>{" "}
@@ -834,25 +879,58 @@ export default function TrendsPage() {
                               {trend.evidence?.sourceCount ?? "—"}
                             </span>
                           </div>
+
                           <div>
-                            <span className="text-neutral-500">Freshness:</span>{" "}
+                            <span className="text-neutral-500">First seen:</span>{" "}
                             <span className="text-neutral-100">
-                              {formatRecency(trend.evidence?.recencyMins)}
+                              {formatUkDateTime(trend.evidence?.firstSeenAt)}
                             </span>
                           </div>
+
                           <div>
-                            <span className="text-neutral-500">Age:</span>{" "}
+                            <span className="text-neutral-500">Last confirmed:</span>{" "}
                             <span className="text-neutral-100">
-                              {formatAge(trend.evidence?.ageHours)}
+                              {formatUkDateTime(trend.evidence?.lastConfirmedAt)}
                             </span>
                           </div>
+
                           <div>
-                            <span className="text-neutral-500">Velocity:</span>{" "}
+                            <span className="text-neutral-500">Platform:</span>{" "}
                             <span className="text-neutral-100">
-                              {trend.evidence?.velocityPerHour != null
-                                ? `${trend.evidence.velocityPerHour}/h`
-                                : "—"}
+                              {trend.evidence?.platform ?? "—"}
                             </span>
+                          </div>
+
+                          <div>
+                            <span className="text-neutral-500">Subreddit:</span>{" "}
+                            <span className="text-neutral-100">
+                              {trend.evidence?.subreddit ?? "—"}
+                            </span>
+                          </div>
+
+                          <div className="w-full">
+                            <span className="text-neutral-500">Link:</span>{" "}
+                            {trend.evidence?.permalink ? (
+                              <a
+                                href={trend.evidence.permalink}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-brand-pink hover:underline"
+                              >
+                                Open source ↗
+                              </a>
+                            ) : trend.evidence?.url ? (
+                              <a
+                                href={trend.evidence.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-brand-pink hover:underline"
+                              >
+                                Open source ↗
+                              </a>
+                            ) : (
+                              <span className="text-neutral-100">—</span>
+                            )}
                           </div>
                         </div>
 
@@ -885,7 +963,6 @@ export default function TrendsPage() {
                         View angles
                       </button>
 
-                      {/* ✅ FIXED: create brief deterministically, then go to /briefs */}
                       <button
                         type="button"
                         onClick={() => turnIntoBrief(trend)}
@@ -908,7 +985,9 @@ export default function TrendsPage() {
         )}
       </div>
 
-      {selectedTrend && <FullAnglesModal trend={selectedTrend} onClose={closeAngles} />}
+      {selectedTrend && (
+        <FullAnglesModal trend={selectedTrend} onClose={() => setSelectedTrend(null)} />
+      )}
     </>
   );
 }

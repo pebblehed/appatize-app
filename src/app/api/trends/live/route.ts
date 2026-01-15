@@ -1,6 +1,6 @@
 // src/app/api/trends/live/route.ts
 //
-// Live Trends API (deterministic, never-500)
+// Live Trends API (deterministic, never-500, never-hang)
 //
 // Purpose:
 // - Surface Trend[] for the UI from live signal sources.
@@ -20,8 +20,14 @@
 // - Do NOT return volatile "time-now" derived fields (ageHours, recencyMins, velocityPerHour).
 //   Those change every request and can trigger client refetch loops.
 // - Keep stable primitives only: counts + timestamps.
+//
+// CRITICAL HANG FIX:
+// - Do NOT HTTP-fetch our own /api/signals/reddit route from within /api/trends/live.
+//   In dev, this can hang. Instead call the route handler in-process.
+// - Add a hard timeout so we never stall the server.
 
 import { NextResponse } from "next/server";
+import { GET as redditGET } from "@/app/api/signals/reddit/route";
 
 export const dynamic = "force-dynamic";
 
@@ -43,17 +49,11 @@ type UpstreamTrendsResponse = {
   debug?: unknown;
 };
 
-/** Shape we return FROM this /api/trends/live route (stable contract). */
-type LiveApiResponse = {
-  source: "live";
-  status: Status;
-  count: number;
-  trends: unknown[];
-  message?: string;
-  debug?: unknown;
-};
-
 type EvidenceLike = {
+  // Copilot: add tolerated alias fields for UI consumption (trajectoryLabel, momentum) as unknown.
+  // Do not change any other fields.
+  trajectoryLabel?: unknown;
+  momentum?: unknown;
   signalCount?: unknown;
   sourceCount?: unknown;
 
@@ -65,12 +65,23 @@ type EvidenceLike = {
 
   momentQualityScore?: unknown;
 
-  // allow unknown extra fields without dropping them
+  // ✅ stable “direction” label (must NOT be derived from time-now here)
+  trajectory?: unknown;
+
+  // stable source details (for Evidence drawer)
+  platform?: unknown;
+  subreddit?: unknown;
+  permalink?: unknown;
+  url?: unknown;
+
   [k: string]: unknown;
 };
 
 type TrendLike = {
   evidence?: unknown;
+
+  trajectoryLabel?: unknown;
+
   decisionState?: unknown;
   decisionRationale?: unknown;
   whyThisMatters?: unknown;
@@ -89,31 +100,32 @@ type TrendLike = {
   debugSignalCount?: unknown;
   debugSourceCount?: unknown;
 
+  // stable source fields commonly present on Stage 2 candidates
+  source?: unknown;
+  subreddit?: unknown;
+  permalink?: unknown;
+  url?: unknown;
+
+  // sometimes upstream may put trajectory on the trend root
+  trajectory?: unknown;
+
   [k: string]: unknown;
+};
+
+/** Shape we return FROM this /api/trends/live route (stable contract). */
+type LiveApiResponse = {
+  source: "live";
+  status: Status;
+  count: number;
+  trends: TrendLike[]; // post-enrichment objects, still tolerant
+  message?: string;
+  debug?: unknown;
 };
 
 function parseLimit(raw: string | null, fallback: number) {
   const n = raw ? Number(raw) : NaN;
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return Math.min(Math.floor(n), 50);
-}
-
-function getOrigin(request: Request): string {
-  try {
-    return new URL(request.url).origin;
-  } catch {
-    return "";
-  }
-}
-
-async function safeFetchJSON<T>(url: string): Promise<T | null> {
-  try {
-    const res = await fetch(url, { cache: "no-store" });
-    if (!res.ok) return null;
-    return (await res.json()) as T;
-  } catch {
-    return null;
-  }
 }
 
 function toNumberOrNull(v: unknown): number | null {
@@ -132,6 +144,10 @@ function toISOIfValidDateString(v: unknown): string | undefined {
   const d = new Date(v);
   if (Number.isNaN(d.getTime())) return undefined;
   return d.toISOString();
+}
+
+function toStringOrUndef(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim().length > 0 ? v : undefined;
 }
 
 /**
@@ -158,14 +174,24 @@ function stripVolatileEvidence(e: EvidenceLike): EvidenceLike {
   // quality score is stable within the upstream call; keep if present
   if (typeof e.momentQualityScore === "number") stable.momentQualityScore = e.momentQualityScore;
 
+  // ✅ keep stable trajectory label if upstream provides it (string only)
+  if (typeof e.trajectory === "string") stable.trajectory = e.trajectory;
+
+  // preserve stable, non-time evidence fields (for Evidence drawer)
+  if (typeof e.platform === "string") stable.platform = e.platform;
+  if (typeof e.subreddit === "string") stable.subreddit = e.subreddit;
+  if (typeof e.permalink === "string") stable.permalink = e.permalink;
+  if (typeof e.url === "string") stable.url = e.url;
+
   return stable;
 }
 
 /**
  * Attach minimal evidence primitives to a Trend object if missing.
+ * Also inject stable source details into evidence so the Evidence drawer has content.
  */
-function ensureEvidence(trend: unknown): unknown {
-  if (!trend || typeof trend !== "object") return trend;
+function ensureEvidence(trend: unknown): TrendLike {
+  if (!trend || typeof trend !== "object") return trend as TrendLike;
 
   const t = trend as TrendLike;
 
@@ -198,6 +224,19 @@ function ensureEvidence(trend: unknown): unknown {
     toIntOrNull(t.debugSourceCount) ??
     null;
 
+  // stable source details (prefer evidence if present, else trend fields)
+  const platformRaw =
+    toStringOrUndef(existingEvidence?.platform) ?? toStringOrUndef(t.source) ?? undefined;
+  const subredditRaw =
+    toStringOrUndef(existingEvidence?.subreddit) ?? toStringOrUndef(t.subreddit) ?? undefined;
+  const permalinkRaw =
+    toStringOrUndef(existingEvidence?.permalink) ?? toStringOrUndef(t.permalink) ?? undefined;
+  const urlRaw = toStringOrUndef(existingEvidence?.url) ?? toStringOrUndef(t.url) ?? undefined;
+
+  // ✅ stable trajectory label (only pass-through, never computed here)
+  const trajectoryRaw =
+    toStringOrUndef(existingEvidence?.trajectory) ?? toStringOrUndef(t.trajectory) ?? undefined;
+
   if (existingEvidence) {
     const merged: EvidenceLike = {
       ...existingEvidence,
@@ -211,6 +250,20 @@ function ensureEvidence(trend: unknown): unknown {
         (typeof existingEvidence.lastConfirmedAt === "string"
           ? existingEvidence.lastConfirmedAt
           : undefined) ?? lastConfirmedAtRaw,
+
+      // inject stable source details into evidence for UI rendering
+      platform: platformRaw ?? existingEvidence.platform,
+      subreddit: subredditRaw ?? existingEvidence.subreddit,
+      permalink: permalinkRaw ?? existingEvidence.permalink,
+      url: urlRaw ?? existingEvidence.url,
+
+      // ✅ keep upstream trajectory if present
+      // ✅ keep upstream trajectory if present
+      trajectory: trajectoryRaw ?? existingEvidence.trajectory,
+
+      // ✅ UI-compat aliases (same value, no new computation)
+      trajectoryLabel: trajectoryRaw ?? existingEvidence.trajectory,
+      momentum: trajectoryRaw ?? existingEvidence.trajectory,
     };
 
     return { ...t, evidence: stripVolatileEvidence(merged) };
@@ -221,6 +274,17 @@ function ensureEvidence(trend: unknown): unknown {
     sourceCount: sourceCountUpstream ?? 1,
     firstSeenAt: firstSeenAtRaw,
     lastConfirmedAt: lastConfirmedAtRaw,
+
+    // stable source details for Evidence drawer
+    platform: platformRaw,
+    subreddit: subredditRaw,
+    permalink: permalinkRaw,
+    url: urlRaw,
+
+    // ✅ stable trajectory if upstream provided it
+    trajectory: trajectoryRaw,
+    trajectoryLabel: trajectoryRaw,
+    momentum: trajectoryRaw,
   };
 
   return { ...t, evidence: stripVolatileEvidence(created) };
@@ -229,7 +293,7 @@ function ensureEvidence(trend: unknown): unknown {
 /**
  * Stage 3.x — Multi-source truth guard (deterministic)
  */
-function enforceMultiSourceTruth(trend: unknown): unknown {
+function enforceMultiSourceTruth(trend: TrendLike): TrendLike {
   if (!trend || typeof trend !== "object") return trend;
 
   const t = trend as TrendLike;
@@ -251,7 +315,7 @@ function enforceMultiSourceTruth(trend: unknown): unknown {
       ...t,
       decisionState: "WAIT",
       decisionRationale:
-        "Corroboration not yet proven (single-source live feed); hold for multi-source confirmation before acting.",
+        "Stop-rule: corroboration not yet proven (single-source live feed). Hold for multi-source confirmation before acting.",
     };
   }
 
@@ -261,7 +325,7 @@ function enforceMultiSourceTruth(trend: unknown): unknown {
 /**
  * Stage 3.8 — Deterministic "Why this matters" (no time-derived values)
  */
-function ensureWhyThisMatters(trend: unknown): unknown {
+function ensureWhyThisMatters(trend: TrendLike): TrendLike {
   if (!trend || typeof trend !== "object") return trend;
 
   const t = trend as TrendLike;
@@ -323,7 +387,7 @@ function ensureWhyThisMatters(trend: unknown): unknown {
 /**
  * Stage 3.9 — Deterministic "Minimal action hint"
  */
-function ensureActionHint(trend: unknown): unknown {
+function ensureActionHint(trend: TrendLike): TrendLike {
   if (!trend || typeof trend !== "object") return trend;
 
   const t = trend as TrendLike;
@@ -341,20 +405,57 @@ function ensureActionHint(trend: unknown): unknown {
   return { ...t, actionHint };
 }
 
-export async function GET(request: Request) {
-  const origin = getOrigin(request);
+/**
+ * Hard timeout wrapper to prevent route hangs.
+ */
+async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return await Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`timeout_after_${ms}ms`)), ms)),
+  ]);
+}
 
+/**
+ * In-process upstream call (no HTTP self-fetch).
+ * Calls the existing /api/signals/reddit route handler directly.
+ */
+async function getUpstreamFromRedditRoute(
+  request: Request,
+  pack: string,
+  limit: number
+): Promise<UpstreamTrendsResponse | null> {
+  try {
+    const url = new URL(request.url);
+    url.pathname = "/api/signals/reddit";
+    url.searchParams.set("pack", pack);
+    url.searchParams.set("limit", String(limit));
+
+    const upstreamReq = new Request(url.toString(), {
+      method: "GET",
+      headers: request.headers,
+    });
+
+    // Never hang: cap at 3.5s (tune later if needed)
+    const res = await withTimeout(redditGET(upstreamReq), 3500);
+
+    if (!res || !(res as Response).ok) return null;
+
+    const json = await (res as Response).json().catch(() => null);
+    return (json as UpstreamTrendsResponse) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
 
     const pack = (searchParams.get("pack") || "fragrance").trim().toLowerCase();
     const limit = parseLimit(searchParams.get("limit"), 25);
 
-    const url = origin
-      ? `${origin}/api/signals/reddit?pack=${encodeURIComponent(pack)}&limit=${limit}`
-      : `/api/signals/reddit?pack=${encodeURIComponent(pack)}&limit=${limit}`;
-
-    const upstream = await safeFetchJSON<UpstreamTrendsResponse>(url);
+    // Critical fix: no HTTP self-fetch; call route handler directly
+    const upstream = await getUpstreamFromRedditRoute(request, pack, limit);
 
     if (!upstream) {
       const payload: LiveApiResponse = {
@@ -363,7 +464,7 @@ export async function GET(request: Request) {
         count: 0,
         trends: [],
         message: "Live source unavailable right now (reddit).",
-        debug: { pack, limit, upstream: null },
+        debug: { pack, limit, upstream: null, note: "in-process route call + timeout" },
       };
       return NextResponse.json(payload, { status: 200 });
     }
@@ -379,6 +480,7 @@ export async function GET(request: Request) {
           pack,
           limit,
           upstream: { source: upstream.source ?? "unknown", status: upstream.status },
+          note: "in-process route call + timeout",
         },
       };
       return NextResponse.json(payload, { status: 200 });
@@ -395,6 +497,7 @@ export async function GET(request: Request) {
           pack,
           limit,
           upstream: { source: upstream.source ?? "unknown", status: upstream.status },
+          note: "in-process route call + timeout",
         },
       };
       return NextResponse.json(payload, { status: 200 });
@@ -419,7 +522,7 @@ export async function GET(request: Request) {
         upstreamSource: upstream.source ?? "unknown",
         telemetry: upstream.telemetry ?? null,
         corroborationMode: "single-source (reddit-only)",
-        note: "Volatile time-derived fields stripped to prevent client refetch loops.",
+        note: "Volatile time-derived fields stripped; evidence includes stable source details + trajectory if upstream provides it; upstream fetched via in-process call w/ timeout.",
         upstreamStatus: upstream.status, // possibly undefined; truth-only
       },
     };

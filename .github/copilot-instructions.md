@@ -1,34 +1,35 @@
-﻿# Copilot Instructions Appatize (anti-drift)
+﻿# Copilot Instructions — Appatize (anti-drift)
 
 You are working inside the Appatize codebase.
 
-## Non-negotiables
+## Non-negotiables (always)
 
-- Do NOT invent files, routes, types, or APIs. If unsure, ask for the file contents or search within the repo.
-- Do NOT introduce `any` unless explicitly requested. Prefer `unknown` + type guards.
-- Do NOT fake intelligence. Deterministic only unless a specific LLM route is being implemented.
-- API routes must be **never-500** and return safe empty states.
-- Keep contracts stable. If a change impacts contracts, state it explicitly and update the contract files.
+- Do NOT invent files, routes, types, APIs, or environment variables.
+- If a referenced file is not provided, ask for its contents or use the repo search.
+- Do NOT rename existing routes, folders, or exports.
+- Do NOT introduce `any` unless explicitly requested.
+- Prefer explicit types and stable contracts.
+- Preserve the "never-500, never-hang, truth-only" approach for API routes.
+- Do NOT add time-now derived fields (e.g., ageHours/recencyMins/velocityPerHour) to API responses unless explicitly requested.
+- Do NOT change API response shapes unless explicitly instructed.
 
-## Source of truth (read these first when making changes)
+## Output rules
 
-- internal/contracts/NORTH_STAR.md
-- internal/contracts/ (any other contract docs you add)
-- src/context/BriefContext.tsx (core Trend/Brief types)
-- src/context/TrendContext.tsx (pin/save behavior)
+- If the user asks for “full file”, output a FULL FILE replacement only.
+- If the user asks for a small change, output a minimal diff or the smallest safe snippet.
+- Never output partial edits that require guessing surrounding code.
+- Never add dependencies unless the user explicitly asks.
 
-## Engineering style
+## Appatize architecture constraints (Stage D)
 
-- Prefer small, explicit helper functions (type guards) over broad casts.
-- Preserve existing file names and public exports.
-- When editing a file: provide a full-file replacement unless asked for a diff.
+- `internal/` is for contracts, engines, evaluation, and provenance.
+- Do NOT move application UI code into `internal/`.
+- Contracts in `internal/contracts/` may define future-facing types; do not delete them for lint cleanliness.
+- Avoid adding new intelligence in routes; keep routes deterministic and truth-only.
 
-## Appatize truth-only principles
+## Safety + quality
 
-- No time-now volatile fields in API payloads if it can cause client refetch loops.
-- If upstream is unavailable, return `{ status: "unavailable", trends: [] }` with HTTP 200 (never-500 pattern).
-
-## Working method
-
-- One file at a time.
-- Start by stating what warnings/errors you are fixing (line refs), then implement.
+- No hallucinated "data", "metrics", or "citations".
+- No placebo features.
+- Prefer conservative, debuggable implementations.
+- If uncertain, ask a single focused question rather than guessing.
