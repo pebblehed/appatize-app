@@ -25,11 +25,27 @@
 // - Do NOT HTTP-fetch our own /api/signals/reddit route from within /api/trends/live.
 //   In dev, this can hang. Instead call the route handler in-process.
 // - Add a hard timeout so we never stall the server.
+//
+// ENTERPRISE AUDIT ADDITION (HCIS-aligned):
+// - Every surfaced trend must carry a stable, auditable envelope:
+//   - trendId (deterministic)
+//   - contractVersion (stable)
+//   - provenance (stable source + timestamps + links)
+//   - audit (decision state + rationale + truth-guard notes)
+//
+// No scaffolding. No "we'll wire later" fields. Only stable primitives.
 
 import { NextResponse } from "next/server";
+import { createHash } from "crypto";
 import { GET as redditGET } from "@/app/api/signals/reddit/route";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * LOCKED DATUM: This should only change when mainline contract-lock advances.
+ * Must be stable (not derived from time-now).
+ */
+const CONTRACT_VERSION = "stage-3.9-contract-lock@ed08a88";
 
 type Status = "ok" | "unavailable";
 
@@ -50,8 +66,6 @@ type UpstreamTrendsResponse = {
 };
 
 type EvidenceLike = {
-  // Copilot: add tolerated alias fields for UI consumption (trajectoryLabel, momentum) as unknown.
-  // Do not change any other fields.
   trajectoryLabel?: unknown;
   momentum?: unknown;
   signalCount?: unknown;
@@ -65,7 +79,7 @@ type EvidenceLike = {
 
   momentQualityScore?: unknown;
 
-  // ✅ stable “direction” label (must NOT be derived from time-now here)
+  // stable “direction” label (must NOT be derived from time-now here)
   trajectory?: unknown;
 
   // stable source details (for Evidence drawer)
@@ -109,6 +123,26 @@ type TrendLike = {
   // sometimes upstream may put trajectory on the trend root
   trajectory?: unknown;
 
+  // ✅ audit envelope additions (stable only)
+  trendId?: string;
+  contractVersion?: string;
+  provenance?: {
+    source: string;
+    platform?: string;
+    subreddit?: string;
+    permalink?: string;
+    url?: string;
+    firstSeenAt?: string;
+    lastConfirmedAt?: string;
+    signalCount?: number;
+    sourceCount?: number;
+  };
+  audit?: {
+    decisionState?: string;
+    decisionRationale?: string;
+    multiSourceTruthGuard?: "PASS" | "DOWNGRADED_TO_WAIT";
+  };
+
   [k: string]: unknown;
 };
 
@@ -117,7 +151,7 @@ type LiveApiResponse = {
   source: "live";
   status: Status;
   count: number;
-  trends: TrendLike[]; // post-enrichment objects, still tolerant
+  trends: TrendLike[];
   message?: string;
   debug?: unknown;
 };
@@ -148,6 +182,28 @@ function toISOIfValidDateString(v: unknown): string | undefined {
 
 function toStringOrUndef(v: unknown): string | undefined {
   return typeof v === "string" && v.trim().length > 0 ? v : undefined;
+}
+
+/**
+ * Deterministic ID based on stable evidence primitives (no time-now).
+ * Purpose: auditability + de-dupe + continuity.
+ */
+function stableTrendId(input: {
+  platform?: string;
+  subreddit?: string;
+  permalink?: string;
+  url?: string;
+  firstSeenAt?: string;
+}) {
+  const parts = [
+    input.platform ?? "",
+    input.subreddit ?? "",
+    input.permalink ?? "",
+    input.url ?? "",
+    input.firstSeenAt ?? "",
+  ];
+  const raw = parts.join("|");
+  return createHash("sha1").update(raw).digest("hex");
 }
 
 /**
@@ -258,7 +314,6 @@ function ensureEvidence(trend: unknown): TrendLike {
       url: urlRaw ?? existingEvidence.url,
 
       // ✅ keep upstream trajectory if present
-      // ✅ keep upstream trajectory if present
       trajectory: trajectoryRaw ?? existingEvidence.trajectory,
 
       // ✅ UI-compat aliases (same value, no new computation)
@@ -300,7 +355,19 @@ function enforceMultiSourceTruth(trend: TrendLike): TrendLike {
 
   const decisionState = typeof t.decisionState === "string" ? t.decisionState.toUpperCase() : null;
 
-  if (decisionState !== "ACT") return t;
+  if (decisionState !== "ACT") {
+    // audit: guard not applied (only relevant when ACT)
+    return {
+      ...t,
+      audit: {
+        ...(typeof t.audit === "object" && t.audit ? (t.audit as TrendLike["audit"]) : {}),
+        decisionState: typeof t.decisionState === "string" ? t.decisionState : undefined,
+        decisionRationale:
+          typeof t.decisionRationale === "string" ? t.decisionRationale : undefined,
+        multiSourceTruthGuard: "PASS",
+      },
+    };
+  }
 
   const evidence =
     t.evidence && typeof t.evidence === "object" ? (t.evidence as EvidenceLike) : null;
@@ -316,10 +383,25 @@ function enforceMultiSourceTruth(trend: TrendLike): TrendLike {
       decisionState: "WAIT",
       decisionRationale:
         "Stop-rule: corroboration not yet proven (single-source live feed). Hold for multi-source confirmation before acting.",
+      audit: {
+        ...(typeof t.audit === "object" && t.audit ? (t.audit as TrendLike["audit"]) : {}),
+        decisionState: "WAIT",
+        decisionRationale:
+          "Stop-rule: corroboration not yet proven (single-source live feed). Hold for multi-source confirmation before acting.",
+        multiSourceTruthGuard: "DOWNGRADED_TO_WAIT",
+      },
     };
   }
 
-  return t;
+  return {
+    ...t,
+    audit: {
+      ...(typeof t.audit === "object" && t.audit ? (t.audit as TrendLike["audit"]) : {}),
+      decisionState: typeof t.decisionState === "string" ? t.decisionState : "ACT",
+      decisionRationale: typeof t.decisionRationale === "string" ? t.decisionRationale : undefined,
+      multiSourceTruthGuard: "PASS",
+    },
+  };
 }
 
 /**
@@ -403,6 +485,70 @@ function ensureActionHint(trend: TrendLike): TrendLike {
   if (decisionState === "REFRESH") actionHint = "Recheck shortly for movement.";
 
   return { ...t, actionHint };
+}
+
+/**
+ * Add HCIS-aligned audit envelope (stable-only).
+ * No time-now, no volatile values.
+ */
+function attachAuditEnvelope(trend: TrendLike, upstreamSourceLabel: string): TrendLike {
+  const evidence =
+    trend.evidence && typeof trend.evidence === "object" ? (trend.evidence as EvidenceLike) : null;
+
+  const platform = toStringOrUndef(evidence?.platform) ?? toStringOrUndef(trend.source);
+  const subreddit = toStringOrUndef(evidence?.subreddit) ?? toStringOrUndef(trend.subreddit);
+  const permalink = toStringOrUndef(evidence?.permalink) ?? toStringOrUndef(trend.permalink);
+  const url = toStringOrUndef(evidence?.url) ?? toStringOrUndef(trend.url);
+
+  const firstSeenAt =
+    toISOIfValidDateString(evidence?.firstSeenAt) ??
+    toISOIfValidDateString(trend.firstSeenAt) ??
+    undefined;
+
+  const lastConfirmedAt =
+    toISOIfValidDateString(evidence?.lastConfirmedAt) ??
+    toISOIfValidDateString(trend.lastConfirmedAt) ??
+    undefined;
+
+  const signalCount =
+    typeof evidence?.signalCount === "number" && Number.isFinite(evidence.signalCount)
+      ? evidence.signalCount
+      : undefined;
+
+  const sourceCount =
+    typeof evidence?.sourceCount === "number" && Number.isFinite(evidence.sourceCount)
+      ? evidence.sourceCount
+      : undefined;
+
+  const trendId = stableTrendId({ platform, subreddit, permalink, url, firstSeenAt });
+
+  const decisionState = typeof trend.decisionState === "string" ? trend.decisionState : undefined;
+  const decisionRationale =
+    typeof trend.decisionRationale === "string" ? trend.decisionRationale : undefined;
+
+  return {
+    ...trend,
+    trendId,
+    contractVersion: CONTRACT_VERSION,
+    provenance: {
+      source: upstreamSourceLabel,
+      platform,
+      subreddit,
+      permalink,
+      url,
+      firstSeenAt,
+      lastConfirmedAt,
+      signalCount,
+      sourceCount,
+    },
+    audit: {
+      ...(typeof trend.audit === "object" && trend.audit
+        ? (trend.audit as TrendLike["audit"])
+        : {}),
+      decisionState,
+      decisionRationale,
+    },
+  };
 }
 
 /**
@@ -505,11 +651,14 @@ export async function GET(request: Request) {
 
     const rawTrends = upstream.trends;
 
+    const upstreamSourceLabel = `reddit:${pack}`;
+
     const trends = rawTrends
       .map(ensureEvidence)
       .map(enforceMultiSourceTruth)
       .map(ensureWhyThisMatters)
-      .map(ensureActionHint);
+      .map(ensureActionHint)
+      .map((t) => attachAuditEnvelope(t, upstreamSourceLabel));
 
     const okPayload: LiveApiResponse = {
       source: "live",
@@ -522,7 +671,8 @@ export async function GET(request: Request) {
         upstreamSource: upstream.source ?? "unknown",
         telemetry: upstream.telemetry ?? null,
         corroborationMode: "single-source (reddit-only)",
-        note: "Volatile time-derived fields stripped; evidence includes stable source details + trajectory if upstream provides it; upstream fetched via in-process call w/ timeout.",
+        contractVersion: CONTRACT_VERSION,
+        note: "Volatile time-derived fields stripped; per-trend audit envelope added (trendId, provenance, contractVersion). Upstream fetched via in-process call w/ timeout.",
         upstreamStatus: upstream.status, // possibly undefined; truth-only
       },
     };
