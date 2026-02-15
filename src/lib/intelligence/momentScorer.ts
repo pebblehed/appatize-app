@@ -2,156 +2,83 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
- * Appatize Stage D — Deterministic MomentScorer
- * - Pure, deterministic, side-effect free
- * - No randomness, no time-based variance
- * - Produces an explainable score + breakdown + reasons
+ * Appatize Stage D — Deterministic MomentScorer (contract-aligned)
  *
- * Notes:
- * - Velocity is explicitly disabled unless reliable timestamps exist on the moment.
- * - This file is intentionally self-contained: no new deps, no scaffolding.
+ * Contract source:
+ * - src/lib/intelligence/momentScore.ts
+ *
+ * Non-negotiables:
+ * - Deterministic: no Date.now, no randomness, no I/O
+ * - Composite derived only from components + SCORE_WEIGHTS_V1 (risk subtractive)
+ * - Velocity must be 0 unless reliable timestamps exist upstream
+ * - Decision derived only from DECISION_THRESHOLDS_V1
+ * - Guards must be stable and replayable
  */
 
-export type MomentScoreGrade = "A" | "B" | "C" | "D" | "F";
-
-export type MomentScoreBreakdown = {
-  /** 0..100 */
-  novelty: number;
-  /** 0..100 */
-  relevance: number;
-  /** 0..100 */
-  coherence: number;
-  /** 0..100 */
-  signalStrength: number;
-  /** 0..100 (higher = more risk) */
-  risk: number;
-  /** 0..100 (disabled unless timestamps exist) */
-  velocity: number;
-};
-
-export type MomentScore = {
-  /** 0..100 final score (risk-adjusted) */
-  score: number;
-  grade: MomentScoreGrade;
-
-  /**
-   * Deterministic pass/fail gate. This does NOT replace qualifyMoment(),
-   * but can be used as a supporting signal where needed.
-   */
-  pass: boolean;
-
-  breakdown: MomentScoreBreakdown;
-
-  /**
-   * Deterministic explanations, ordered (stable).
-   * Keep as short tokens for logs/UI.
-   */
-  reasons: string[];
-
-  /**
-   * Debug-friendly supporting values (stable keys, stable ordering).
-   * Avoid putting raw external text here.
-   */
-  signals: Record<string, number | boolean | null>;
-};
+import {
+  SCORE_MODEL_VERSION,
+  SCORE_WEIGHTS_V1,
+  DECISION_THRESHOLDS_V1,
+  type MomentScore,
+  type ScoreComponents,
+  type ConfidenceBand,
+  type DecisionState,
+  type DecisionRationale,
+} from "./momentScore";
 
 type ScorerOptions = {
   /**
-   * Minimum final score to pass. Defaults to 70.
-   * (This is a support threshold; the canonical firewall remains qualifyMoment()).
-   */
-  passThreshold?: number;
-
-  /**
-   * Weightings must sum to ~1.0. We normalize defensively.
-   * risk is applied as a penalty, not part of the positive weighted sum.
-   */
-  weights?: Partial<{
-    novelty: number;
-    relevance: number;
-    coherence: number;
-    signalStrength: number;
-    velocity: number;
-    riskPenalty: number; // 0..1 multiplier on risk
-  }>;
-
-  /**
-   * If true, velocity will be computed only when timestamps exist and are reliable.
-   * Default true.
+   * Override of decision thresholds is not allowed here (contract-controlled).
+   * This exists only to support future deterministic feature flags if needed.
    */
   enableVelocityWhenTimestampsExist?: boolean;
 };
 
-const DEFAULTS = {
-  passThreshold: 70,
-  weights: {
-    novelty: 0.22,
-    relevance: 0.32,
-    coherence: 0.22,
-    signalStrength: 0.24,
-    velocity: 0.0, // explicitly disabled by default
-    riskPenalty: 0.55, // penalty multiplier applied to risk
-  },
+const DEFAULTS: Required<ScorerOptions> = {
   enableVelocityWhenTimestampsExist: true,
-} as const;
+};
 
-/**
- * Public API — scores a fused moment deterministically.
- */
 export function scoreMoment(moment: unknown, options: ScorerOptions = {}): MomentScore {
-  const opts = normalizeOptions(options);
+  const opts = { ...DEFAULTS, ...options };
 
-  // Extract stable numeric signals from the incoming moment (shape-agnostic).
   const extracted = extractSignals(moment);
 
-  // Compute core sub-scores (0..100). All deterministic.
-  const novelty = scoreNovelty(extracted);
-  const relevance = scoreRelevance(extracted);
-  const coherence = scoreCoherence(extracted);
-  const signalStrength = scoreSignalStrength(extracted);
+  // Components (0..100). Deterministic, conservative fallbacks.
+  const density = scoreDensity(extracted);
+  const breadth = scoreBreadth(extracted);
 
-  // Velocity: explicitly disabled unless timestamps exist and enabled by option.
-  const velocityEnabled =
-    opts.enableVelocityWhenTimestampsExist === true && extracted.hasReliableTimestamps === true;
+  // Velocity: explicitly disabled unless reliable timestamps exist upstream.
+  const velocityEnabled = opts.enableVelocityWhenTimestampsExist && extracted.hasReliableTimestamps;
   const velocity = velocityEnabled ? scoreVelocity(extracted) : 0;
 
-  // Risk is a penalty score: higher risk reduces final score.
+  const recurrence = scoreRecurrence(extracted);
   const risk = scoreRisk(extracted);
 
-  // Positive weighted sum.
-  const positive =
-    novelty * opts.weights.novelty +
-    relevance * opts.weights.relevance +
-    coherence * opts.weights.coherence +
-    signalStrength * opts.weights.signalStrength +
-    velocity * opts.weights.velocity;
-
-  // Risk-adjusted score: subtract penalty (deterministic), clamp 0..100.
-  const penalty = risk * opts.weights.riskPenalty;
-  const finalScore = clamp01to100(positive - penalty);
-
-  const grade = gradeFromScore(finalScore);
-
-  const reasons = buildReasons({
-    novelty,
-    relevance,
-    coherence,
-    signalStrength,
+  const components: ScoreComponents = {
+    density,
+    breadth,
     velocity,
+    recurrence,
     risk,
-    velocityEnabled,
-  });
+  };
 
-  const pass = finalScore >= opts.passThreshold;
+  const composite = computeComposite(components);
 
-  return stableMomentScore({
-    score: finalScore,
-    grade,
-    pass,
-    breakdown: { novelty, relevance, coherence, signalStrength, risk, velocity },
-    reasons,
-    signals: extracted.publicSignals,
-  });
+  const confidence = computeConfidence(components, extracted);
+
+  const decision = computeDecision(components, composite);
+
+  return {
+    scoreModelVersion: SCORE_MODEL_VERSION,
+    components,
+    composite,
+    confidence,
+    decision,
+    guards: {
+      multiSourceTruthRequiredForAct: true,
+      timeNowVolatilityExcluded: true,
+    },
+  };
 }
 
 /**
@@ -164,50 +91,6 @@ export default momentScorer;
    Deterministic primitives
    ========================= */
 
-function normalizeOptions(options: ScorerOptions) {
-  const passThreshold = isFiniteNumber(options.passThreshold)
-    ? clamp(0, 100, options.passThreshold as number)
-    : DEFAULTS.passThreshold;
-
-  const w = { ...DEFAULTS.weights, ...(options.weights ?? {}) };
-
-  // Normalize positive weights (novelty/relevance/coherence/signalStrength/velocity).
-  const posSum = w.novelty + w.relevance + w.coherence + w.signalStrength + w.velocity;
-  const safePosSum = posSum > 0 ? posSum : 1;
-
-  const weights = {
-    novelty: w.novelty / safePosSum,
-    relevance: w.relevance / safePosSum,
-    coherence: w.coherence / safePosSum,
-    signalStrength: w.signalStrength / safePosSum,
-    velocity: w.velocity / safePosSum,
-    riskPenalty: clamp(0, 1, w.riskPenalty),
-  };
-
-  const enableVelocityWhenTimestampsExist =
-    options.enableVelocityWhenTimestampsExist ?? DEFAULTS.enableVelocityWhenTimestampsExist;
-
-  return { passThreshold, weights, enableVelocityWhenTimestampsExist };
-}
-
-function stableMomentScore(ms: MomentScore): MomentScore {
-  // Ensure stable ordering of signals keys (deterministic output).
-  const sortedSignals: Record<string, number | boolean | null> = {};
-  for (const k of Object.keys(ms.signals).sort()) sortedSignals[k] = ms.signals[k];
-
-  // Ensure stable ordering of reasons (already stable, but defensively enforce).
-  const reasons = [...ms.reasons];
-
-  return {
-    score: ms.score,
-    grade: ms.grade,
-    pass: ms.pass,
-    breakdown: ms.breakdown,
-    reasons,
-    signals: sortedSignals,
-  };
-}
-
 function clamp(min: number, max: number, n: number) {
   if (n < min) return min;
   if (n > max) return max;
@@ -215,193 +98,8 @@ function clamp(min: number, max: number, n: number) {
 }
 
 function clamp01to100(n: number) {
-  if (!isFiniteNumber(n)) return 0;
+  if (!Number.isFinite(n)) return 0;
   return clamp(0, 100, n);
-}
-
-function isFiniteNumber(v: unknown): v is number {
-  return typeof v === "number" && Number.isFinite(v);
-}
-
-function gradeFromScore(score: number): MomentScoreGrade {
-  // Deterministic grading bands.
-  if (score >= 90) return "A";
-  if (score >= 80) return "B";
-  if (score >= 70) return "C";
-  if (score >= 60) return "D";
-  return "F";
-}
-
-/* =========================
-   Signal extraction (shape-agnostic)
-   ========================= */
-
-type ExtractedSignals = {
-  // Normalized signals 0..1 where applicable
-  uniqueness01: number;
-  relevance01: number;
-  coherence01: number;
-  strength01: number;
-
-  // Risk components 0..1
-  spam01: number;
-  toxicity01: number;
-  manipulation01: number;
-  uncertainty01: number;
-
-  // Velocity support
-  hasReliableTimestamps: boolean;
-  velocity01: number;
-
-  // Public stable signals (numbers / booleans only)
-  publicSignals: Record<string, number | boolean | null>;
-};
-
-/**
- * Extracts signals from likely fused-moment shapes without assuming the schema.
- * Any missing fields degrade gracefully to conservative defaults.
- */
-function extractSignals(moment: unknown): ExtractedSignals {
-  const m = (moment ?? {}) as any;
-
-  // Helper to read common candidate paths.
-  const pickNumber01 = (candidates: any[], fallback: number) => {
-    for (const v of candidates) {
-      const n = coerceNumber(v);
-      if (n === null) continue;
-      // Some upstream sources might already be 0..100; detect and normalize.
-      const normalized = n > 1.5 ? n / 100 : n;
-      return clamp(0, 1, normalized);
-    }
-    return fallback;
-  };
-
-  const pickBool = (candidates: any[], fallback: boolean) => {
-    for (const v of candidates) {
-      if (typeof v === "boolean") return v;
-    }
-    return fallback;
-  };
-
-  // Uniqueness/novelty signals (0..1)
-  const uniqueness01 = pickNumber01(
-    [
-      m?.score?.novelty,
-      m?.scores?.novelty,
-      m?.novelty,
-      m?.features?.novelty,
-      m?.signals?.novelty,
-      m?.signals?.uniqueness,
-      m?.features?.uniqueness,
-    ],
-    0.35
-  );
-
-  // Relevance signals (0..1)
-  const relevance01 = pickNumber01(
-    [
-      m?.score?.relevance,
-      m?.scores?.relevance,
-      m?.relevance,
-      m?.features?.relevance,
-      m?.signals?.relevance,
-      m?.alignment?.relevance,
-    ],
-    0.4
-  );
-
-  // Coherence signals (0..1)
-  const coherence01 = pickNumber01(
-    [
-      m?.score?.coherence,
-      m?.scores?.coherence,
-      m?.coherence,
-      m?.features?.coherence,
-      m?.signals?.coherence,
-      m?.quality?.coherence,
-    ],
-    0.45
-  );
-
-  // Signal strength (0..1) (how strong / corroborated / multi-source)
-  const strength01 = pickNumber01(
-    [
-      m?.score?.signalStrength,
-      m?.scores?.signalStrength,
-      m?.signalStrength,
-      m?.features?.signalStrength,
-      m?.signals?.strength,
-      m?.signals?.confidence,
-      m?.confidence,
-      m?.quality?.confidence,
-    ],
-    0.4
-  );
-
-  // Risk components (0..1). Conservative defaults.
-  const spam01 = pickNumber01(
-    [m?.risk?.spam, m?.risks?.spam, m?.signals?.spam, m?.quality?.spam],
-    0.15
-  );
-  const toxicity01 = pickNumber01(
-    [m?.risk?.toxicity, m?.risks?.toxicity, m?.signals?.toxicity, m?.quality?.toxicity],
-    0.05
-  );
-  const manipulation01 = pickNumber01(
-    [m?.risk?.manipulation, m?.risks?.manipulation, m?.signals?.manipulation],
-    0.1
-  );
-  const uncertainty01 = pickNumber01(
-    [
-      m?.risk?.uncertainty,
-      m?.risks?.uncertainty,
-      m?.signals?.uncertainty,
-      // Sometimes "confidence" exists instead; uncertainty = 1 - confidence
-      invert01FromCandidate(m?.confidence),
-      invert01FromCandidate(m?.signals?.confidence),
-      invert01FromCandidate(m?.quality?.confidence),
-    ],
-    0.35
-  );
-
-  // Timestamps: determine if we can compute velocity deterministically.
-  const hasReliableTimestamps = pickBool(
-    [m?.timestamps?.reliable, m?.meta?.timestampsReliable, m?.time?.reliable],
-    false
-  );
-
-  // Optional explicit velocity signal (0..1). If absent, conservative default.
-  const velocity01 = pickNumber01(
-    [m?.signals?.velocity, m?.features?.velocity, m?.velocity, m?.score?.velocity],
-    0
-  );
-
-  const publicSignals: Record<string, number | boolean | null> = {
-    uniqueness01,
-    relevance01,
-    coherence01,
-    strength01,
-    spam01,
-    toxicity01,
-    manipulation01,
-    uncertainty01,
-    hasReliableTimestamps,
-    velocity01: hasReliableTimestamps ? velocity01 : 0,
-  };
-
-  return {
-    uniqueness01,
-    relevance01,
-    coherence01,
-    strength01,
-    spam01,
-    toxicity01,
-    manipulation01,
-    uncertainty01,
-    hasReliableTimestamps,
-    velocity01: hasReliableTimestamps ? velocity01 : 0,
-    publicSignals,
-  };
 }
 
 function coerceNumber(v: unknown): number | null {
@@ -413,97 +111,300 @@ function coerceNumber(v: unknown): number | null {
   return null;
 }
 
-function invert01FromCandidate(v: unknown): number | null {
-  const n = coerceNumber(v);
-  if (n === null) return null;
-  const normalized = n > 1.5 ? n / 100 : n;
-  const c01 = clamp(0, 1, normalized);
-  return clamp(0, 1, 1 - c01);
+function pickNumber01(candidates: unknown[], fallback01: number): number {
+  for (const v of candidates) {
+    const n = coerceNumber(v);
+    if (n === null) continue;
+    // Normalize if upstream uses 0..100.
+    const normalized = n > 1.5 ? n / 100 : n;
+    return clamp(0, 1, normalized);
+  }
+  return clamp(0, 1, fallback01);
+}
+
+function pickBool(candidates: unknown[], fallback: boolean): boolean {
+  for (const v of candidates) if (typeof v === "boolean") return v;
+  return fallback;
 }
 
 /* =========================
-   Scoring functions (0..100)
+   Contract composite logic
    ========================= */
 
-function scoreNovelty(s: ExtractedSignals): number {
-  // Reward uniqueness with slight lift if coherence is also decent.
-  const base = s.uniqueness01;
-  const lift = 0.08 * s.coherence01;
-  return clamp01to100((base + lift) * 100);
+function computeComposite(c: ScoreComponents): number {
+  // Composite is deterministic from components + weights.
+  // risk is subtractive in the contract.
+  const positive =
+    c.density * SCORE_WEIGHTS_V1.density +
+    c.breadth * SCORE_WEIGHTS_V1.breadth +
+    c.velocity * SCORE_WEIGHTS_V1.velocity +
+    c.recurrence * SCORE_WEIGHTS_V1.recurrence;
+
+  const penalty = c.risk * SCORE_WEIGHTS_V1.risk;
+
+  return clamp01to100(positive - penalty);
 }
 
-function scoreRelevance(s: ExtractedSignals): number {
-  // Relevance is primary: penalize if uncertainty is high.
-  const base = s.relevance01;
-  const uncertaintyPenalty = 0.18 * s.uncertainty01;
-  return clamp01to100((base - uncertaintyPenalty) * 100);
+/* =========================
+   Decision + confidence (contract thresholds)
+   ========================= */
+
+function computeDecision(
+  c: ScoreComponents,
+  composite: number
+): { state: DecisionState; rationale: DecisionRationale } {
+  // ACT gate (strict)
+  const act = DECISION_THRESHOLDS_V1.act;
+  const wait = DECISION_THRESHOLDS_V1.wait;
+  const refresh = DECISION_THRESHOLDS_V1.refresh;
+
+  const flags = buildRationaleFlags(c);
+
+  // ACT requires multi-source truth (enforced via breadth proxy) and risk ceiling.
+  const canAct =
+    composite >= act.compositeMin && c.breadth >= act.breadthMin && c.risk <= act.riskMax;
+
+  if (canAct) {
+    return {
+      state: "ACT",
+      rationale: {
+        summary: "Composite meets ACT threshold with sufficient breadth and acceptable risk.",
+        flags,
+      },
+    };
+  }
+
+  // WAIT band
+  if (composite >= wait.compositeMin) {
+    return {
+      state: "WAIT",
+      rationale: {
+        summary: "Composite is promising but does not satisfy ACT guardrails (breadth/risk).",
+        flags,
+      },
+    };
+  }
+
+  // REFRESH condition: low composite, but velocity is strong (when enabled upstream).
+  const canRefresh = composite <= refresh.compositeMax && c.velocity >= refresh.velocityMin;
+
+  if (canRefresh) {
+    return {
+      state: "REFRESH",
+      rationale: {
+        summary: "Composite is low but velocity is strong; refresh signals and re-evaluate.",
+        flags,
+      },
+    };
+  }
+
+  // Default: WAIT (conservative)
+  return {
+    state: "WAIT",
+    rationale: {
+      summary:
+        "Insufficient composite strength for ACT; monitor for corroboration or improved signals.",
+      flags,
+    },
+  };
 }
 
-function scoreCoherence(s: ExtractedSignals): number {
-  // Coherence must be strong for downstream explainability.
-  // Penalize if manipulation risk is high.
-  const base = s.coherence01;
-  const manipulationPenalty = 0.12 * s.manipulation01;
-  return clamp01to100((base - manipulationPenalty) * 100);
+function computeConfidence(c: ScoreComponents, extracted: ExtractedSignals): ConfidenceBand {
+  /**
+   * Deterministic confidence heuristic.
+   * High confidence requires:
+   * - strong density and breadth
+   * - low risk
+   * - low uncertainty proxy (extracted.uncertainty01)
+   */
+  const uncertaintyScore = clamp01to100((1 - extracted.uncertainty01) * 100);
+
+  const high =
+    c.density >= 70 &&
+    c.breadth >= 60 &&
+    c.risk <= 30 &&
+    uncertaintyScore >= 70 &&
+    extracted.multiSource === true;
+
+  if (high) return "HIGH";
+
+  const moderate = c.density >= 45 && c.breadth >= 35 && c.risk <= 55 && uncertaintyScore >= 45;
+
+  if (moderate) return "MODERATE";
+
+  return "LOW";
 }
 
-function scoreSignalStrength(s: ExtractedSignals): number {
-  // Strength is about multi-source confidence; penalize if spam risk is high.
-  const base = s.strength01;
-  const spamPenalty = 0.15 * s.spam01;
-  return clamp01to100((base - spamPenalty) * 100);
+function buildRationaleFlags(c: ScoreComponents): DecisionRationale["flags"] {
+  return {
+    singleSource: c.breadth < DECISION_THRESHOLDS_V1.act.breadthMin,
+    lowBreadth: c.breadth < 50,
+    lowDensity: c.density < 50,
+    lowVelocity: c.velocity < 50,
+    highRisk: c.risk > DECISION_THRESHOLDS_V1.act.riskMax,
+    insufficientCorroboration: c.breadth < DECISION_THRESHOLDS_V1.act.breadthMin,
+  };
+}
+
+/* =========================
+   Signal extraction (shape-agnostic, deterministic)
+   ========================= */
+
+type ExtractedSignals = {
+  // 0..1 signals
+  density01: number;
+  breadth01: number;
+  recurrence01: number;
+  risk01: number;
+  velocity01: number;
+
+  // Supporting risk components (0..1) (used to compute uncertainty proxy)
+  uncertainty01: number;
+
+  // Guard inputs
+  hasReliableTimestamps: boolean;
+  multiSource: boolean;
+};
+
+function extractSignals(moment: unknown): ExtractedSignals {
+  const m = (moment ?? {}) as any;
+
+  /**
+   * We intentionally support several likely shapes without assuming schema:
+   * - moment.components.*
+   * - moment.score/components/scores/features/signals.*
+   *
+   * Conservative defaults prevent accidental over-scoring.
+   */
+
+  const density01 = pickNumber01(
+    [
+      m?.components?.density,
+      m?.score?.density,
+      m?.scores?.density,
+      m?.signals?.density,
+      m?.features?.density,
+      m?.quality?.density,
+    ],
+    0.35
+  );
+
+  const breadth01 = pickNumber01(
+    [
+      m?.components?.breadth,
+      m?.score?.breadth,
+      m?.scores?.breadth,
+      m?.signals?.breadth,
+      m?.features?.breadth,
+      m?.quality?.breadth,
+      // Sometimes breadth is approximated by sourceCount normalization elsewhere
+      normalizeCount01(m?.sourceCount),
+      normalizeCount01(m?.sources?.length),
+    ],
+    0.3
+  );
+
+  const recurrence01 = pickNumber01(
+    [
+      m?.components?.recurrence,
+      m?.score?.recurrence,
+      m?.scores?.recurrence,
+      m?.signals?.recurrence,
+      m?.features?.recurrence,
+      m?.quality?.recurrence,
+    ],
+    0.25
+  );
+
+  // Risk: if upstream provides 0..1 or 0..100, normalize.
+  const risk01 = pickNumber01(
+    [
+      m?.components?.risk,
+      m?.risk?.score,
+      m?.score?.risk,
+      m?.scores?.risk,
+      m?.signals?.risk,
+      m?.quality?.risk,
+    ],
+    0.2
+  );
+
+  const hasReliableTimestamps = pickBool(
+    [m?.timestamps?.reliable, m?.meta?.timestampsReliable, m?.time?.reliable],
+    false
+  );
+
+  // Velocity: only used if hasReliableTimestamps is true.
+  const velocity01Raw = pickNumber01(
+    [
+      m?.components?.velocity,
+      m?.signals?.velocity,
+      m?.features?.velocity,
+      m?.score?.velocity,
+      m?.scores?.velocity,
+    ],
+    0
+  );
+  const velocity01 = hasReliableTimestamps ? velocity01Raw : 0;
+
+  // Multi-source proxy (for confidence + ACT rationale). Deterministic.
+  const multiSource =
+    pickBool([m?.multiSource, m?.signals?.multiSource, m?.meta?.multiSource], false) ||
+    (coerceNumber(m?.sourceCount) ?? 0) >= 2 ||
+    (Array.isArray(m?.sources) && m.sources.length >= 2);
+
+  // Uncertainty proxy: if confidence is provided, invert it. Else default conservative.
+  const confidence01 = pickNumber01(
+    [m?.confidence, m?.signals?.confidence, m?.quality?.confidence],
+    0.55
+  );
+  const uncertainty01 = clamp(0, 1, 1 - confidence01);
+
+  return {
+    density01,
+    breadth01,
+    recurrence01,
+    risk01,
+    velocity01,
+    uncertainty01,
+    hasReliableTimestamps,
+    multiSource,
+  };
+}
+
+function normalizeCount01(v: unknown): number | null {
+  const n = coerceNumber(v);
+  if (n === null) return null;
+  // Saturating normalization: 0..5 => 0..1
+  const clamped = clamp(0, 5, n);
+  return clamped / 5;
+}
+
+/* =========================
+   Component scoring (0..100)
+   ========================= */
+
+function scoreDensity(s: ExtractedSignals): number {
+  // Density: how concentrated / strong the signal is.
+  return clamp01to100(s.density01 * 100);
+}
+
+function scoreBreadth(s: ExtractedSignals): number {
+  // Breadth: corroboration across sources/communities.
+  return clamp01to100(s.breadth01 * 100);
 }
 
 function scoreVelocity(s: ExtractedSignals): number {
-  // Velocity is explicitly disabled unless timestamps exist.
-  // When enabled, use provided velocity01 only (no implicit "now").
+  // Velocity: ONLY uses provided velocity signal, never "time-now".
   return clamp01to100(s.velocity01 * 100);
 }
 
-function scoreRisk(s: ExtractedSignals): number {
-  // Deterministic risk aggregate (0..100). Higher is worse.
-  // Weighted to treat toxicity/manipulation as heavier than spam.
-  const risk01 =
-    0.25 * s.spam01 + 0.3 * s.toxicity01 + 0.25 * s.manipulation01 + 0.2 * s.uncertainty01;
-
-  return clamp01to100(risk01 * 100);
+function scoreRecurrence(s: ExtractedSignals): number {
+  // Recurrence: repeated appearance over time windows (as provided).
+  return clamp01to100(s.recurrence01 * 100);
 }
 
-/* =========================
-   Reasons (stable, explainable)
-   ========================= */
-
-function buildReasons(input: {
-  novelty: number;
-  relevance: number;
-  coherence: number;
-  signalStrength: number;
-  velocity: number;
-  risk: number;
-  velocityEnabled: boolean;
-}): string[] {
-  const reasons: string[] = [];
-
-  // Positive reasons (ordered)
-  if (input.relevance >= 80) reasons.push("RELEVANCE_HIGH");
-  if (input.coherence >= 80) reasons.push("COHERENCE_HIGH");
-  if (input.signalStrength >= 80) reasons.push("SIGNAL_STRONG");
-  if (input.novelty >= 80) reasons.push("NOVELTY_HIGH");
-
-  // Velocity reason (explicit)
-  if (!input.velocityEnabled) reasons.push("VELOCITY_DISABLED");
-  else if (input.velocity >= 70) reasons.push("VELOCITY_HIGH");
-
-  // Risk reasons (ordered)
-  if (input.risk >= 70) reasons.push("RISK_HIGH");
-  else if (input.risk >= 45) reasons.push("RISK_MED");
-
-  // Gaps (ordered)
-  if (input.relevance < 55) reasons.push("RELEVANCE_LOW");
-  if (input.coherence < 55) reasons.push("COHERENCE_LOW");
-  if (input.signalStrength < 55) reasons.push("SIGNAL_WEAK");
-  if (input.novelty < 45) reasons.push("NOVELTY_LOW");
-
-  // Ensure stable uniqueness and deterministic order already enforced by push order.
-  return reasons;
+function scoreRisk(s: ExtractedSignals): number {
+  // Risk: higher is riskier.
+  return clamp01to100(s.risk01 * 100);
 }
