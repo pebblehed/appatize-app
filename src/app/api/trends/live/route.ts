@@ -39,6 +39,9 @@ import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { GET as redditGET } from "@/app/api/signals/reddit/route";
 
+import { scoreMoment } from "@/lib/intelligence/momentScorer";
+import type { MomentScore as CanonMomentScore } from "@/lib/intelligence/momentScore";
+
 export const dynamic = "force-dynamic";
 
 /**
@@ -123,6 +126,9 @@ type TrendLike = {
   // sometimes upstream may put trajectory on the trend root
   trajectory?: unknown;
 
+  // ✅ Stage D canonical score (deterministic, versioned)
+  momentScore?: CanonMomentScore;
+
   // ✅ audit envelope additions (stable only)
   trendId?: string;
   contractVersion?: string;
@@ -182,6 +188,62 @@ function toISOIfValidDateString(v: unknown): string | undefined {
 
 function toStringOrUndef(v: unknown): string | undefined {
   return typeof v === "string" && v.trim().length > 0 ? v : undefined;
+}
+
+function clamp(min: number, max: number, n: number) {
+  if (n < min) return min;
+  if (n > max) return max;
+  return n;
+}
+
+/**
+ * Deterministic saturating mapping for counts.
+ * No time-now. No randomness.
+ */
+function countToScore(count: number | null, cap: number): number {
+  if (count == null || !Number.isFinite(count) || count <= 0) return 0;
+  const c = Math.min(Math.floor(count), cap);
+  return Math.round((c / cap) * 100);
+}
+
+/**
+ * Derive scoring components from stable evidence primitives only.
+ * - density: based on signalCount (cap 25)
+ * - breadth: based on sourceCount (cap 10)
+ * - risk: if upstream provides momentQualityScore (0..100, higher=better), invert to risk.
+ * - recurrence: unknown in Stage 2 feed => 0 (conservative)
+ * - velocity: disabled here (0) unless upstream explicitly provides reliable timestamps (we do not infer here)
+ */
+function deriveComponentsFromEvidence(e: EvidenceLike | null): {
+  density: number;
+  breadth: number;
+  velocity: number;
+  recurrence: number;
+  risk: number;
+} {
+  const signalCount =
+    typeof e?.signalCount === "number" && Number.isFinite(e.signalCount) ? e.signalCount : null;
+  const sourceCount =
+    typeof e?.sourceCount === "number" && Number.isFinite(e.sourceCount) ? e.sourceCount : null;
+
+  const density = countToScore(signalCount, 25);
+  const breadth = countToScore(sourceCount, 10);
+
+  const quality =
+    typeof e?.momentQualityScore === "number" && Number.isFinite(e.momentQualityScore)
+      ? clamp(0, 100, e.momentQualityScore)
+      : null;
+
+  // If quality exists: risk = (100 - quality). Else conservative baseline.
+  const risk = quality == null ? 20 : clamp(0, 100, 100 - quality);
+
+  return {
+    density,
+    breadth,
+    velocity: 0,
+    recurrence: 0,
+    risk,
+  };
 }
 
 /**
@@ -346,6 +408,52 @@ function ensureEvidence(trend: unknown): TrendLike {
 }
 
 /**
+ * Stage D — Attach canonical MomentScore (deterministic, versioned)
+ * - No time-now
+ * - Components derived from stable evidence primitives only
+ */
+function attachMomentScore(trend: TrendLike): TrendLike {
+  if (!trend || typeof trend !== "object") return trend;
+
+  const evidence =
+    trend.evidence && typeof trend.evidence === "object" ? (trend.evidence as EvidenceLike) : null;
+
+  const derived = deriveComponentsFromEvidence(evidence);
+
+  const scoringInput = {
+    components: {
+      density: derived.density,
+      breadth: derived.breadth,
+      velocity: derived.velocity,
+      recurrence: derived.recurrence,
+      risk: derived.risk,
+    },
+    sourceCount: typeof evidence?.sourceCount === "number" ? evidence.sourceCount : undefined,
+    signalCount: typeof evidence?.signalCount === "number" ? evidence.signalCount : undefined,
+  };
+
+  const momentScore = scoreMoment(scoringInput);
+
+  // If upstream didn't provide decisionState/decisionRationale, fill from canonical score.
+  const decisionState =
+    typeof trend.decisionState === "string" && trend.decisionState.trim().length > 0
+      ? trend.decisionState
+      : momentScore.decision.state;
+
+  const decisionRationale =
+    typeof trend.decisionRationale === "string" && trend.decisionRationale.trim().length > 0
+      ? trend.decisionRationale
+      : momentScore.decision.rationale.summary;
+
+  return {
+    ...trend,
+    momentScore,
+    decisionState,
+    decisionRationale,
+  };
+}
+
+/**
  * Stage 3.x — Multi-source truth guard (deterministic)
  */
 function enforceMultiSourceTruth(trend: TrendLike): TrendLike {
@@ -378,16 +486,36 @@ function enforceMultiSourceTruth(trend: TrendLike): TrendLike {
       : null;
 
   if (sourceCount == null || sourceCount < 2) {
+    const stopRuleRationale =
+      "Stop-rule: corroboration not yet proven (single-source live feed). Hold for multi-source confirmation before acting.";
+
+    const patchedMomentScore =
+      t.momentScore && typeof t.momentScore === "object"
+        ? ({
+            ...t.momentScore,
+            decision: {
+              state: "WAIT",
+              rationale: {
+                summary: stopRuleRationale,
+                flags: {
+                  ...(t.momentScore.decision?.rationale?.flags ?? {}),
+                  singleSource: true,
+                  insufficientCorroboration: true,
+                },
+              },
+            },
+          } as CanonMomentScore)
+        : undefined;
+
     return {
       ...t,
       decisionState: "WAIT",
-      decisionRationale:
-        "Stop-rule: corroboration not yet proven (single-source live feed). Hold for multi-source confirmation before acting.",
+      decisionRationale: stopRuleRationale,
+      momentScore: patchedMomentScore ?? t.momentScore,
       audit: {
         ...(typeof t.audit === "object" && t.audit ? (t.audit as TrendLike["audit"]) : {}),
         decisionState: "WAIT",
-        decisionRationale:
-          "Stop-rule: corroboration not yet proven (single-source live feed). Hold for multi-source confirmation before acting.",
+        decisionRationale: stopRuleRationale,
         multiSourceTruthGuard: "DOWNGRADED_TO_WAIT",
       },
     };
@@ -655,6 +783,7 @@ export async function GET(request: Request) {
 
     const trends = rawTrends
       .map(ensureEvidence)
+      .map(attachMomentScore)
       .map(enforceMultiSourceTruth)
       .map(ensureWhyThisMatters)
       .map(ensureActionHint)
@@ -672,7 +801,7 @@ export async function GET(request: Request) {
         telemetry: upstream.telemetry ?? null,
         corroborationMode: "single-source (reddit-only)",
         contractVersion: CONTRACT_VERSION,
-        note: "Volatile time-derived fields stripped; per-trend audit envelope added (trendId, provenance, contractVersion). Upstream fetched via in-process call w/ timeout.",
+        note: "Volatile time-derived fields stripped; per-trend audit envelope added (trendId, provenance, contractVersion). MomentScore attached deterministically from stable evidence primitives. Upstream fetched via in-process call w/ timeout.",
         upstreamStatus: upstream.status, // possibly undefined; truth-only
       },
     };
