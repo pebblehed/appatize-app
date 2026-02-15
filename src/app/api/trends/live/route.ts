@@ -33,6 +33,10 @@
 //   - provenance (stable source + timestamps + links)
 //   - audit (decision state + rationale + truth-guard notes)
 //
+// Stage D.3:
+// - Enforce qualifyMoment() firewall non-bypassably.
+//   Only ALLOW moments are surfaced.
+//
 // No scaffolding. No "we'll wire later" fields. Only stable primitives.
 
 import { NextResponse } from "next/server";
@@ -41,6 +45,7 @@ import { GET as redditGET } from "@/app/api/signals/reddit/route";
 
 import { scoreMoment } from "@/lib/intelligence/momentScorer";
 import type { MomentScore as CanonMomentScore } from "@/lib/intelligence/momentScore";
+import { qualifyMoment } from "@/lib/intelligence/qualifyMoment";
 
 export const dynamic = "force-dynamic";
 
@@ -778,16 +783,28 @@ export async function GET(request: Request) {
     }
 
     const rawTrends = upstream.trends;
-
     const upstreamSourceLabel = `reddit:${pack}`;
 
-    const trends = rawTrends
-      .map(ensureEvidence)
-      .map(attachMomentScore)
-      .map(enforceMultiSourceTruth)
-      .map(ensureWhyThisMatters)
-      .map(ensureActionHint)
-      .map((t) => attachAuditEnvelope(t, upstreamSourceLabel));
+    // Stage D.3 non-bypassable firewall:
+    // - ensureEvidence -> attachMomentScore -> qualifyMoment (filter) -> rest of pipeline
+    const qualified: TrendLike[] = [];
+
+    for (const raw of rawTrends) {
+      const t0 = ensureEvidence(raw);
+      const t1 = attachMomentScore(t0);
+
+      const q = qualifyMoment(t1);
+      if (q.decision !== "ALLOW") continue;
+
+      const t2 = enforceMultiSourceTruth(t1);
+      const t3 = ensureWhyThisMatters(t2);
+      const t4 = ensureActionHint(t3);
+      const t5 = attachAuditEnvelope(t4, upstreamSourceLabel);
+
+      qualified.push(t5);
+    }
+
+    const trends = qualified;
 
     const okPayload: LiveApiResponse = {
       source: "live",
@@ -801,7 +818,7 @@ export async function GET(request: Request) {
         telemetry: upstream.telemetry ?? null,
         corroborationMode: "single-source (reddit-only)",
         contractVersion: CONTRACT_VERSION,
-        note: "Volatile time-derived fields stripped; per-trend audit envelope added (trendId, provenance, contractVersion). MomentScore attached deterministically from stable evidence primitives. Upstream fetched via in-process call w/ timeout.",
+        note: "Volatile time-derived fields stripped; per-trend audit envelope added (trendId, provenance, contractVersion). MomentScore attached deterministically from stable evidence primitives. qualifyMoment firewall enforced. Upstream fetched via in-process call w/ timeout.",
         upstreamStatus: upstream.status, // possibly undefined; truth-only
       },
     };
