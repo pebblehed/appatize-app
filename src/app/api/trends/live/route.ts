@@ -37,6 +37,10 @@
 // - Enforce qualifyMoment() firewall non-bypassably.
 //   Only ALLOW moments are surfaced.
 //
+// Debug counters (deterministic):
+// - Count ALLOW vs REJECT and aggregate reject reason codes.
+// - No per-trend logging, no time-now, stable ordering.
+//
 // No scaffolding. No "we'll wire later" fields. Only stable primitives.
 
 import { NextResponse } from "next/server";
@@ -205,10 +209,33 @@ function clamp(min: number, max: number, n: number) {
  * Deterministic saturating mapping for counts.
  * No time-now. No randomness.
  */
-function countToScore(count: number | null, cap: number): number {
-  if (count == null || !Number.isFinite(count) || count <= 0) return 0;
-  const c = Math.min(Math.floor(count), cap);
-  return Math.round((c / cap) * 100);
+function densityFromSignalCount(signalCount: number | null): number {
+  if (signalCount == null || !Number.isFinite(signalCount) || signalCount <= 0) return 0;
+
+  const n = Math.floor(signalCount);
+
+  // Step mapping (deterministic):
+  // Singleton should not be treated as ~0.
+  if (n === 1) return 35;
+  if (n === 2) return 45;
+  if (n === 3) return 55;
+  if (n <= 5) return 65; // 4–5
+  if (n <= 10) return 75; // 6–10
+  if (n <= 20) return 85; // 11–20
+  return 95; // 21+
+}
+
+function breadthFromSourceCount(sourceCount: number | null): number {
+  if (sourceCount == null || !Number.isFinite(sourceCount) || sourceCount <= 0) return 0;
+
+  const n = Math.floor(sourceCount);
+
+  // Step mapping (deterministic):
+  if (n === 1) return 30;
+  if (n === 2) return 55;
+  if (n === 3) return 70;
+  if (n <= 5) return 80; // 4–5
+  return 90; // 6+
 }
 
 /**
@@ -231,8 +258,8 @@ function deriveComponentsFromEvidence(e: EvidenceLike | null): {
   const sourceCount =
     typeof e?.sourceCount === "number" && Number.isFinite(e.sourceCount) ? e.sourceCount : null;
 
-  const density = countToScore(signalCount, 25);
-  const breadth = countToScore(sourceCount, 10);
+  const density = densityFromSignalCount(signalCount);
+  const breadth = breadthFromSourceCount(sourceCount);
 
   const quality =
     typeof e?.momentQualityScore === "number" && Number.isFinite(e.momentQualityScore)
@@ -726,6 +753,13 @@ async function getUpstreamFromRedditRoute(
   }
 }
 
+function sortReasonCounts(input: Record<string, number>): Record<string, number> {
+  const keys = Object.keys(input).sort();
+  const out: Record<string, number> = {};
+  for (const k of keys) out[k] = input[k];
+  return out;
+}
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
@@ -789,12 +823,29 @@ export async function GET(request: Request) {
     // - ensureEvidence -> attachMomentScore -> qualifyMoment (filter) -> rest of pipeline
     const qualified: TrendLike[] = [];
 
+    // Deterministic debug counters
+    const rawCount = rawTrends.length;
+    let allowedCount = 0;
+    let rejectedCount = 0;
+
+    // Aggregate reason codes (stable keys, deterministic ordering applied at end)
+    const rejectReasonCounts: Record<string, number> = {};
+
     for (const raw of rawTrends) {
       const t0 = ensureEvidence(raw);
       const t1 = attachMomentScore(t0);
 
       const q = qualifyMoment(t1);
-      if (q.decision !== "ALLOW") continue;
+      if (q.decision !== "ALLOW") {
+        rejectedCount += 1;
+        for (const r of q.reasons) {
+          const key = typeof r === "string" && r.length > 0 ? r : "UNKNOWN_REASON";
+          rejectReasonCounts[key] = (rejectReasonCounts[key] ?? 0) + 1;
+        }
+        continue;
+      }
+
+      allowedCount += 1;
 
       const t2 = enforceMultiSourceTruth(t1);
       const t3 = ensureWhyThisMatters(t2);
@@ -818,7 +869,13 @@ export async function GET(request: Request) {
         telemetry: upstream.telemetry ?? null,
         corroborationMode: "single-source (reddit-only)",
         contractVersion: CONTRACT_VERSION,
-        note: "Volatile time-derived fields stripped; per-trend audit envelope added (trendId, provenance, contractVersion). MomentScore attached deterministically from stable evidence primitives. qualifyMoment firewall enforced. Upstream fetched via in-process call w/ timeout.",
+        firewall: {
+          rawCount,
+          allowedCount,
+          rejectedCount,
+          rejectedReasonCounts: sortReasonCounts(rejectReasonCounts),
+        },
+        note: "Volatile time-derived fields stripped; per-trend audit envelope added (trendId, provenance, contractVersion). MomentScore attached deterministically from stable evidence primitives. qualifyMoment firewall enforced. Debug includes deterministic firewall counters and aggregated reject reasons. Upstream fetched via in-process call w/ timeout.",
         upstreamStatus: upstream.status, // possibly undefined; truth-only
       },
     };

@@ -11,7 +11,6 @@
 // - Uses ONLY stable primitives already present on the moment/trend:
 //   - momentScore (canonical)
 //   - evidence signalCount/sourceCount
-// - Velocity explicitly ignored/disabled unless upstream has reliable timestamps (handled in scorer).
 //
 // Note: This is a firewall, not a scorer. It does not compute a score.
 // It enforces minimum quality requirements before a moment can be surfaced.
@@ -35,6 +34,11 @@ type MomentLike = {
   evidence?: unknown;
 };
 
+// Tunable firewall floor.
+// Goal: allow early WAIT/REFRESH candidates through for visibility,
+// while still blocking extreme low-quality noise.
+const COMPOSITE_MIN = 10;
+
 function toIntOrNull(v: unknown): number | null {
   if (typeof v !== "number" || !Number.isFinite(v)) return null;
   return Math.round(v);
@@ -50,7 +54,6 @@ function isMomentScore(x: unknown): x is MomentScore {
   if (!x || typeof x !== "object") return false;
   const ms = x as MomentScore;
 
-  // Minimal structural checks (deterministic)
   return (
     typeof ms.scoreModelVersion === "string" &&
     typeof ms.composite === "number" &&
@@ -83,12 +86,10 @@ export function qualifyMoment(input: unknown): QualifyResult {
   }
 
   // 2) Minimum composite quality gate.
-  // This is not “decision surfacing”; this is a quality floor.
   const composite = clamp(0, 100, ms.composite);
-  if (composite < 35) reasons.push("COMPOSITE_TOO_LOW");
+  if (composite < COMPOSITE_MIN) reasons.push("COMPOSITE_TOO_LOW");
 
-  // 3) Breadth floor: avoid single-source hallucinated “moments”.
-  // This is independent from your ACT multi-source stop-rule (which is stricter).
+  // 3) Evidence sanity: require at least 1 source + 1 signal.
   const evidence =
     m.evidence && typeof m.evidence === "object" ? (m.evidence as EvidenceLike) : null;
 
@@ -100,12 +101,8 @@ export function qualifyMoment(input: unknown): QualifyResult {
   if (sourceCount == null) reasons.push("SOURCE_COUNT_MISSING");
   else if (sourceCount < 1) reasons.push("SOURCE_COUNT_INVALID");
 
-  // Quality firewall floor: require at least 1 source to exist,
-  // but do NOT require multi-source here (that is ACT guard territory).
-  // This firewall prevents “empty evidence” moments leaking through.
   if (sourceCount != null && sourceCount < 1) reasons.push("NO_EVIDENCE_SOURCES");
 
-  // 4) SignalCount sanity (prevents empty clusters)
   const signalCount =
     evidence && typeof evidence.signalCount !== "undefined"
       ? toIntOrNull(evidence.signalCount)
@@ -114,16 +111,12 @@ export function qualifyMoment(input: unknown): QualifyResult {
   if (signalCount == null) reasons.push("SIGNAL_COUNT_MISSING");
   else if (signalCount < 1) reasons.push("SIGNAL_COUNT_INVALID");
 
-  // 5) Risk hard ceiling (quality firewall, not a decision).
-  // If risk is extremely high, we reject regardless of composite.
+  // 4) Risk hard ceiling (quality firewall, not a decision).
   const risk = clamp(0, 100, ms.components.risk);
   if (risk >= 85) reasons.push("RISK_TOO_HIGH");
 
-  // Decision
-  const reject = reasons.length > 0;
-
   return {
-    decision: reject ? "REJECT" : "ALLOW",
+    decision: reasons.length > 0 ? "REJECT" : "ALLOW",
     reasons,
   };
 }
