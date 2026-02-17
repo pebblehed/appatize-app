@@ -1,0 +1,29 @@
+{
+  "version": "D.4.2",
+  "root": ".",
+  "include": [
+    "internal/contracts/**/*",
+    "internal/governance/**/*",
+    "internal/mse/**/*",
+    "internal/cie/**/*",
+    "internal/stage-d/**/*"
+  ],
+  "exclude": [
+    "node_modules/**",
+    ".next/**",
+    "dist/**",
+    "build/**",
+    ".git/**",
+    "coverage/**",
+
+    "internal/stage-d/contracts/tools/**",
+    "internal/stage-d/contracts/contract-manifest.json"
+  ],
+
+  "extensions": [".md", ".json", ".ts", ".tsx", ".js", ".cjs", ".mjs", ".yaml", ".yml"],
+  "normalization": {
+    "lineEndings": "LF",
+    "trimTrailingWhitespace": true,
+    "collapseFinalNewlines": true
+  }
+}

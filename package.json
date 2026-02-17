@@ -13,7 +13,9 @@
     "check:ci": "npm run typecheck && npm run lint && npm run build",
     "format": "prettier . --write",
     "format:check": "prettier . --check",
-    "prepare": "husky"
+    "prepare": "husky",
+    "contracts:manifest:check": "node internal/stage-d/contracts/tools/contractManifest.mjs check",
+    "contracts:manifest:update": "node internal/stage-d/contracts/tools/contractManifest.mjs update"
   },
   "dependencies": {
     "@heroicons/react": "^2.2.0",

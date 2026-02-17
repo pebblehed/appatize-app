@@ -1,0 +1,135 @@
+{
+  "algorithm": "sha256",
+  "compositeSha256": "be61e4f75653aebafa3e6e87ff5294b708cad9188a4cbfefcae8cd4231e13450",
+  "fileCount": 24,
+  "files": [
+    {
+      "bytes": 0,
+      "path": "internal/cie/intelligenceEngine.ts",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "path": "internal/cie/model.ts",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "path": "internal/cie/postprocess.ts",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "path": "internal/cie/prompt.ts",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 8303,
+      "path": "internal/contracts/CIE_OUTPUT_SCHEMA.ts",
+      "sha256": "6f9c0030e9c9ad483eaa2bf2ef71e1d9a25b443ba5bb8b8b5d820d42d1b4a9f4"
+    },
+    {
+      "bytes": 0,
+      "path": "internal/contracts/ERROR_CODES.md",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 4982,
+      "path": "internal/contracts/INTELLIGENCE_CONTRACT_STAGE_D.md",
+      "sha256": "5426550beefad5470b38ebfa0baf58860981e97eca0f615545b023b3665a838b"
+    },
+    {
+      "bytes": 1101,
+      "path": "internal/contracts/INTELLIGENCE_CONTRACT.md",
+      "sha256": "0b4c06bd6aa49118b4e6f5252f4207f935ff919ba6f5dbe6556ac13ad666f607"
+    },
+    {
+      "bytes": 1204,
+      "path": "internal/contracts/intelligent-output-envelope.ts",
+      "sha256": "ca315230f91e213be0a524cb246f0f0d7d1543168d3b6c30004e79eb83de54d6"
+    },
+    {
+      "bytes": 7719,
+      "path": "internal/contracts/MSE_OUTPUT_SCHEMA.ts",
+      "sha256": "c6c0f40ae7ebb4602a04df7cdaf39302aa0e010a415e7067a5d5999b3cfc5cd2"
+    },
+    {
+      "bytes": 0,
+      "path": "internal/contracts/NORMALIZERS.ts",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 1225,
+      "path": "internal/contracts/NORTH_STAR.md",
+      "sha256": "a109931dd34a71554fda4cace77ca471bbb8788eecfc3eda975b63f064127871"
+    },
+    {
+      "bytes": 0,
+      "path": "internal/contracts/provenance.ts",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 410,
+      "path": "internal/contracts/version.ts",
+      "sha256": "a6ba0534f8306ca562ae287c36cabcbd77992f0aafbf06d908e1a67cdf7113dc"
+    },
+    {
+      "bytes": 1629,
+      "path": "internal/governance/enforce-contract.ts",
+      "sha256": "d38649e386dfb80a8fea1acc7336a149e04a269b331f46d51b32f791fc0aec7c"
+    },
+    {
+      "bytes": 2017,
+      "path": "internal/governance/enforce-generate-api.ts",
+      "sha256": "db32fd5fb9973084e3d277aaaf9ca0bd2e8cf0a6b05e3b8be9a63c7fecfe10fb"
+    },
+    {
+      "bytes": 1924,
+      "path": "internal/governance/enforce-live-api.ts",
+      "sha256": "ed9b46526e5307e02a8ca6548fdb10a34ac3e8a4d85e40d941e43d67d4e1c5c4"
+    },
+    {
+      "bytes": 0,
+      "path": "internal/mse/angleEngine.ts",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "path": "internal/mse/behaviour.ts",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "path": "internal/mse/mseEngine.ts",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "path": "internal/mse/msePostprocess.ts",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "path": "internal/mse/msePrompt.ts",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 0,
+      "path": "internal/mse/promptBuilder.ts",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "bytes": 658,
+      "path": "internal/stage-d/contracts/contract-manifest.config.json",
+      "sha256": "49264e42ce433ef3a50fef61718d668de195382a459c4c481b28676b538cf484"
+    }
+  ],
+  "generatedAtUtc": "2026-02-17T18:57:27.672Z",
+  "manifestVersion": "D.4.2",
+  "normalization": {
+    "collapseFinalNewlines": true,
+    "lineEndings": "LF",
+    "trimTrailingWhitespace": true
+  },
+  "root": "."
+}
