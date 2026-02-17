@@ -6,6 +6,8 @@ import type { Brief } from "@/context/BriefContext";
 import { PLATFORM_IDS, type PlatformId } from "@/engine/platforms";
 import { buildScriptPrompt } from "@/engine/scriptEngine";
 import { cleanText } from "@/engine/cleanText";
+import { enforceGenerateApiResponse } from "../../../../../internal/governance/enforce-generate-api";
+import { CONTRACT_VERSION } from "../../../../../internal/contracts/version";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -376,14 +378,16 @@ export async function POST(req: NextRequest) {
       culturalInsight = null;
     }
 
-    return new Response(
-      JSON.stringify({
-        variants: scoredVariants,
-        platforms: platformList,
-        cultural: culturalInsight,
-      }),
-      { status: 200 }
-    );
+    const okPayload = {
+      contractVersion: CONTRACT_VERSION,
+      variants: scoredVariants,
+      platforms: platformList,
+      cultural: culturalInsight,
+    };
+
+    enforceGenerateApiResponse(okPayload);
+
+    return new Response(JSON.stringify(okPayload), { status: 200 });
   } catch (err: unknown) {
     const message =
       err instanceof Error ? err.message : typeof err === "string" ? err : "Unknown error";
@@ -395,16 +399,25 @@ export async function POST(req: NextRequest) {
       ((err as { status?: number }).status === 429 ||
         (err as { code?: string }).code === "rate_limit_exceeded")
     ) {
-      return new Response(
-        JSON.stringify({
-          error:
-            "Rate limit reached while generating scripts. Please wait a few seconds and try again.",
-          code: "rate_limit",
-        }),
-        { status: 429 }
-      );
+      const rateLimitPayload = {
+        contractVersion: CONTRACT_VERSION,
+        error:
+          "Rate limit reached while generating scripts. Please wait a few seconds and try again.",
+        code: "rate_limit",
+      };
+
+      enforceGenerateApiResponse(rateLimitPayload);
+
+      return new Response(JSON.stringify(rateLimitPayload), { status: 429 });
     }
 
-    return new Response(JSON.stringify({ error: "Script generation failed" }), { status: 500 });
+    const errorPayload = {
+      contractVersion: CONTRACT_VERSION,
+      error: "Script generation failed",
+    };
+
+    enforceGenerateApiResponse(errorPayload);
+
+    return new Response(JSON.stringify(errorPayload), { status: 500 });
   }
 }
