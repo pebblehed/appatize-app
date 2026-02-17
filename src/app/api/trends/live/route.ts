@@ -50,6 +50,7 @@ import { GET as redditGET } from "@/app/api/signals/reddit/route";
 import { scoreMoment } from "@/lib/intelligence/momentScorer";
 import type { MomentScore as CanonMomentScore } from "@/lib/intelligence/momentScore";
 import { qualifyMoment } from "@/lib/intelligence/qualifyMoment";
+import { enforceLiveApiResponse } from "../../../../../internal/governance/enforce-live-api";
 
 export const dynamic = "force-dynamic";
 
@@ -880,6 +881,7 @@ export async function GET(request: Request) {
       },
     };
 
+    enforceLiveApiResponse(okPayload);
     return NextResponse.json(okPayload, { status: 200 });
   } catch (err) {
     console.error("[/api/trends/live] error:", err);
@@ -892,6 +894,7 @@ export async function GET(request: Request) {
       message: "Unable to build live trends right now.",
     };
 
+    enforceLiveApiResponse(payload);
     return NextResponse.json(payload, { status: 200 });
   }
 }
