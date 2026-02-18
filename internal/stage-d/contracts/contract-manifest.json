@@ -1,6 +1,6 @@
 {
   "algorithm": "sha256",
-  "compositeSha256": "be61e4f75653aebafa3e6e87ff5294b708cad9188a4cbfefcae8cd4231e13450",
+  "compositeSha256": "b7d5cd865e2bd873937b33df0e2df25626b75349ebc750571bcdad4eb6c583bf",
   "fileCount": 24,
   "files": [
     {
@@ -119,12 +119,12 @@
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     {
-      "bytes": 658,
+      "bytes": 636,
       "path": "internal/stage-d/contracts/contract-manifest.config.json",
-      "sha256": "49264e42ce433ef3a50fef61718d668de195382a459c4c481b28676b538cf484"
+      "sha256": "840d85f75c3ae52563739dfd18580f246b5e7915249190344e6e1d3a14ce63f7"
     }
   ],
-  "generatedAtUtc": "2026-02-17T18:57:27.672Z",
+  "generatedAtUtc": "2026-02-18T17:03:38.711Z",
   "manifestVersion": "D.4.2",
   "normalization": {
     "collapseFinalNewlines": true,

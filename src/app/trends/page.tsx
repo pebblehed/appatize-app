@@ -676,7 +676,7 @@ export default function TrendsPage() {
     setSelectedTrend(trend);
   };
 
-  const closeAngles = () => setSelectedTrend(null);
+  //const closeAngles = () => setSelectedTrend(null);
 
   const toggleEvidence = (id: string) => {
     setExpandedEvidenceId((prev) => (prev === id ? null : id));
