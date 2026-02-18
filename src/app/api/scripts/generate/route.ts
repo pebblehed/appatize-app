@@ -9,9 +9,20 @@ import { cleanText } from "@/engine/cleanText";
 import { enforceGenerateApiResponse } from "../../../../../internal/governance/enforce-generate-api";
 import { CONTRACT_VERSION } from "../../../../../internal/contracts/version";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+/**
+ * IMPORTANT (CI/build stability):
+ * Do NOT instantiate OpenAI at module-load time.
+ * Next.js may evaluate route modules during build/analysis, and CI does not have secrets.
+ * We lazy-init inside the request handler to avoid build-time credential failures.
+ */
+function getOpenAIClient() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    // Throwing here is fine; we catch at request-time and return a proper response.
+    throw new Error("Missing OPENAI_API_KEY");
+  }
+  return new OpenAI({ apiKey });
+}
 
 type ScriptVariantInternal = {
   id: string;
@@ -31,6 +42,7 @@ type CulturalInsight = {
 };
 
 export async function POST(req: NextRequest) {
+  // Keep the explicit guard to return a clean API error instead of a generic 500.
   if (!process.env.OPENAI_API_KEY) {
     return new Response(JSON.stringify({ error: "Missing OPENAI_API_KEY" }), { status: 500 });
   }
@@ -67,6 +79,9 @@ export async function POST(req: NextRequest) {
   );
 
   try {
+    // Lazy-init: safe for CI builds (no secrets at build time).
+    const openai = getOpenAIClient();
+
     // 1️⃣ Pass 1: generate scripts + angleName + notes per platform
     const baseVariants: ScriptVariantInternal[] = await Promise.all(
       platformList.map(async (platformId, index) => {
