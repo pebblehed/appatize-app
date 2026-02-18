@@ -1,27 +1,32 @@
 {
   "algorithm": "sha256",
-  "compositeSha256": "b7d5cd865e2bd873937b33df0e2df25626b75349ebc750571bcdad4eb6c583bf",
-  "fileCount": 24,
+  "compositeSha256": "d6183bcea8fbb53f12a73367f6c15d9d3c0281f27b9087e41a007256508b18ec",
+  "fileCount": 32,
   "files": [
     {
-      "bytes": 0,
+      "bytes": 505,
+      "path": "internal/cie/assertProvenance.ts",
+      "sha256": "6e554072fff798a8261046e1f68f084bad04c8f8c24c2c34340ff3446e9a0d9d"
+    },
+    {
+      "bytes": 8099,
       "path": "internal/cie/intelligenceEngine.ts",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "sha256": "baf50ab3878ba71d50ab54408e72456b34493685842ac9e83d50e96c16bec729"
     },
     {
-      "bytes": 0,
-      "path": "internal/cie/model.ts",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "bytes": 1908,
+      "path": "internal/cie/momentMemory.ts",
+      "sha256": "f0889fc878f1fbdccc9646016093bfe59fded9be624833c134c662e8347a18be"
     },
     {
-      "bytes": 0,
-      "path": "internal/cie/postprocess.ts",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "bytes": 2293,
+      "path": "internal/cie/normaliseBehaviour.ts",
+      "sha256": "abd42925055e582a0b4d63da45f3978062b35ab4958b326021ae4a46c5bee542"
     },
     {
-      "bytes": 0,
-      "path": "internal/cie/prompt.ts",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "bytes": 133,
+      "path": "internal/cie/README.md",
+      "sha256": "061fcf8d0dbc81403cd287bd610fbf6e385482465d65414be168133a5d245ace"
     },
     {
       "bytes": 8303,
@@ -44,9 +49,24 @@
       "sha256": "0b4c06bd6aa49118b4e6f5252f4207f935ff919ba6f5dbe6556ac13ad666f607"
     },
     {
+      "bytes": 433,
+      "path": "internal/contracts/INTELLIGENT_OUTPUT_ENVELOPE.ts",
+      "sha256": "311a9117a2e7cecbe012bd16204573dced94dfe9cc06421953c8260a130dcffd"
+    },
+    {
       "bytes": 1204,
       "path": "internal/contracts/intelligent-output-envelope.ts",
       "sha256": "ca315230f91e213be0a524cb246f0f0d7d1543168d3b6c30004e79eb83de54d6"
+    },
+    {
+      "bytes": 1599,
+      "path": "internal/contracts/MOMENT_MEMORY_RECORD.ts",
+      "sha256": "9f65e8931bcb43e24f6c15bd84cab2620dba192599ce53d3f3defa8c19faad50"
+    },
+    {
+      "bytes": 6864,
+      "path": "internal/contracts/MOMENT_QUALITY_CONTRACT.ts",
+      "sha256": "49381031c768674fd913578b47812d804dd9395333d59691ce0f7174257f8e9c"
     },
     {
       "bytes": 7719,
@@ -89,34 +109,54 @@
       "sha256": "ed9b46526e5307e02a8ca6548fdb10a34ac3e8a4d85e40d941e43d67d4e1c5c4"
     },
     {
-      "bytes": 0,
+      "bytes": 16689,
       "path": "internal/mse/angleEngine.ts",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "sha256": "bc647b2beec2d9c86b02178058324c59433c2a7d0e8eb5bda9295c16112e60ba"
     },
     {
-      "bytes": 0,
+      "bytes": 1199,
       "path": "internal/mse/behaviour.ts",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "sha256": "8a982774b7689e8538e903ae8f1f92f5539aacf2b71d0605273143609c02cf2a"
     },
     {
-      "bytes": 0,
-      "path": "internal/mse/mseEngine.ts",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "bytes": 7088,
+      "path": "internal/mse/lifecycle/evaluateMomentLifecycle.ts",
+      "sha256": "ceb3501173a6776f492f7a1a68c82a4daa13556414d80299d6910a1b80a6d0d2"
     },
     {
-      "bytes": 0,
-      "path": "internal/mse/msePostprocess.ts",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    {
-      "bytes": 0,
-      "path": "internal/mse/msePrompt.ts",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    {
-      "bytes": 0,
+      "bytes": 3295,
       "path": "internal/mse/promptBuilder.ts",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "sha256": "ee767884e4bde993b9f13f1572d35ca3e63eb3cf778cc522714e7dc2e90c5667"
+    },
+    {
+      "bytes": 4373,
+      "path": "internal/mse/quality/legibility.ts",
+      "sha256": "1771a4658fa4b92abbc8427900f1c5d0a11afeeb2cd1d18b71df001123cd4a1e"
+    },
+    {
+      "bytes": 4668,
+      "path": "internal/mse/quality/narrative.ts",
+      "sha256": "97abfddfd5b0616308b538ab8342cbdbea1140862e6b8d015479dd295bf05f8f"
+    },
+    {
+      "bytes": 5792,
+      "path": "internal/mse/quality/qualifyMoment.ts",
+      "sha256": "3a87f41f8abd5a4cb8d3afb7dec2afdf147a468c18cb65c2f51964bf131d8a69"
+    },
+    {
+      "bytes": 2270,
+      "path": "internal/mse/quality/signalDensity.ts",
+      "sha256": "9f510aeae4556443155cd3a9731260aaced2289f6884cf9813407ce5150d9c3c"
+    },
+    {
+      "bytes": 3482,
+      "path": "internal/mse/quality/velocity.ts",
+      "sha256": "5b9a616619fcd785f732793eec1cda739297fb3daed2b47ae5175e1d6b3e0ee8"
+    },
+    {
+      "bytes": 127,
+      "path": "internal/mse/README.md",
+      "sha256": "02abccb77e2994c9497407156a854bc4e545eef9a6bda10d2eea5b1aec73b23e"
     },
     {
       "bytes": 636,
@@ -124,7 +164,7 @@
       "sha256": "840d85f75c3ae52563739dfd18580f246b5e7915249190344e6e1d3a14ce63f7"
     }
   ],
-  "generatedAtUtc": "2026-02-18T17:03:38.711Z",
+  "generatedAtUtc": "2026-02-18T21:23:59.073Z",
   "manifestVersion": "D.4.2",
   "normalization": {
     "collapseFinalNewlines": true,
